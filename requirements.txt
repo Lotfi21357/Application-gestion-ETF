@@ -2,7 +2,11 @@ streamlit
 yfinance
 pandas
 numpy
-tzdata
-streamlit-autorefresh
 plotly
 PyGithub
+scipy
+ta
+requests_cache
+sqlalchemy
+tzdata
+streamlit-autorefresh
