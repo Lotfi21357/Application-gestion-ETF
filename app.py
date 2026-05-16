@@ -12,6 +12,7 @@
 #   • Position Sizing Modeler (poids cibles par enveloppe et régime)
 #   • Optimisation mémoire et cache pour mobile
 #   • Toutes les fonctionnalités v5.5 conservées (MWR, fallback or, transactions...)
+#   • NOUVEAU : Suppression d'un ETF entier depuis la sidebar
 #
 # Requis (requirements.txt) :
 #   streamlit yfinance pandas numpy plotly PyGithub scipy ta requests_cache sqlalchemy tzdata
@@ -986,7 +987,6 @@ class QuantRiskEngine:
 # MODULE 10 : PORTFOLIO ENGINE (inchangé v5.5)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Fonction de conversion pour les positions (format étendu)
 def enrich_positions(raw_positions: List[Dict]) -> List[Dict]:
     result = []
     for pos in raw_positions:
@@ -1608,7 +1608,7 @@ def plot_relative_perf(dm: DataManager, ticker: str, nom: str) -> Optional[go.Fi
     return fig
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 15 : STREAMLIT UI v5.6 (intégrant Screener, Scoring, Arbitrage)
+# MODULE 15 : STREAMLIT UI v5.6 (avec suppression d'ETF)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class StreamlitUI:
@@ -1627,7 +1627,6 @@ class StreamlitUI:
         self.se = se
         self.pcm = pcm if pcm is not None else PortfolioConfigManager()
         self.te = te if te is not None else TransactionEngine()
-        # Nouveaux moteurs v5.6
         self.analytics = AnalyticsEngine(dm)
         self.signal = SignalEngine(dm, self.analytics)
 
@@ -1635,7 +1634,7 @@ class StreamlitUI:
     def _sign(v: float) -> str:
         return "+" if v >= 0 else ""
 
-    # ── SIDEBAR (inchangé) ─────────────────────────────────────────────────
+    # ── SIDEBAR (avec suppression d'ETF) ─────────────────────────────────────
     def render_sidebar(self) -> Tuple[bool, List[Dict], float, float, float]:
         st.sidebar.markdown("## ⚙️ Paramètres v5.6")
         mode_direct = st.sidebar.toggle("🔌 Mode Direct (Vue Brute)", value=False)
@@ -1692,6 +1691,31 @@ class StreamlitUI:
                 st.rerun()
 
         st.sidebar.markdown("---")
+        # --- NOUVEAU BLOC : SUPPRESSION D'UN ETF ---
+        st.sidebar.markdown("### 🗑️ Supprimer un ETF")
+        config_manager = PortfolioConfigManager()
+        current_positions = config_manager.load_positions()
+        if current_positions:
+            ticker_to_delete = st.sidebar.selectbox(
+                "Choisir l'ETF à retirer",
+                options=[pos["ticker"] for pos in current_positions],
+                format_func=lambda x: f"{x} — {ETF_LIBRARY.get(x, {}).get('nom', 'Nom inconnu')}",
+                key="delete_etf_selector"
+            )
+            st.sidebar.warning(f"Action irréversible : cela supprimera {ticker_to_delete} de tous les modules.")
+            if st.sidebar.button("❌ Supprimer définitivement", use_container_width=True, type="primary"):
+                updated_positions = [pos for pos in current_positions if pos["ticker"] != ticker_to_delete]
+                if config_manager.save_positions(updated_positions):
+                    st.session_state["raw_positions"] = updated_positions
+                    st.session_state["positions"] = enrich_positions(updated_positions)
+                    st.sidebar.success(f"🎯 {ticker_to_delete} supprimé avec succès !")
+                    st.rerun()
+                else:
+                    st.sidebar.error("Erreur lors de la suppression.")
+        else:
+            st.sidebar.info("Aucune position active à supprimer.")
+        st.sidebar.markdown("---")
+
         if self.pm.status == "github":
             st.sidebar.markdown('<div class="persist-ok">🔗 GitHub Gist actif</div>', unsafe_allow_html=True)
         elif self.pm.warning_msg:
@@ -1716,7 +1740,7 @@ class StreamlitUI:
                 pos["prm"] -= bonus_fortuneo / pos["parts"]
         return mode_direct, positions_conf, capital_reel, ajustement_pat, bonus_fortuneo
 
-    # ── HEADER (inchangé) ─────────────────────────────────────────────────
+    # ── HEADER ────────────────────────────────────────────────────────────────
     def render_header(self, mode_direct: bool, live_ok: int, live_total: int):
         now = datetime.now(ZoneInfo("Europe/Paris"))
         st.markdown('<div style="display:flex;align-items:baseline;gap:1rem;margin-bottom:.2rem;">'
@@ -1724,7 +1748,8 @@ class StreamlitUI:
                     '<span style="font-size:1.5rem;font-weight:700;color:#E2E8F0;">COCKPIT DÉCISIONNEL</span>'
                     '<span style="font-family:Space Mono;font-size:.9rem;color:#6B7585;">v5.6 · SCREENER</span></div>', unsafe_allow_html=True)
         c1, c2 = st.columns([3, 1])
-        with c1: st.caption(f"Prix live · {now.strftime('%d/%m/%Y %H:%M:%S')} (Paris) · Cache 30s/90s")
+        with c1:
+            st.caption(f"Prix live · {now.strftime('%d/%m/%Y %H:%M:%S')} (Paris) · Cache 30s/90s")
         with c2:
             pct = live_ok / live_total * 100 if live_total else 0
             bc = "#22C55E" if pct >= 80 else "#F97316" if pct >= 50 else "#FF3131"
@@ -1733,7 +1758,7 @@ class StreamlitUI:
         if mode_direct:
             st.markdown('<div class="mode-direct-banner">🔌 MODE DIRECT ACTIF --- Valeur marchande pure</div>', unsafe_allow_html=True)
 
-    # ── BANDEAU RÉGIME (inchangé) ─────────────────────────────────────────
+    # ── BANDEAU RÉGIME ────────────────────────────────────────────────────────
     def render_regime_banner(self, regime: Dict):
         sc = regime["confirmed_score"]
         label = regime["confirmed_label"]
@@ -1767,7 +1792,7 @@ class StreamlitUI:
                                     f'<div style="font-family:Space Mono;font-weight:700;color:{"#22C55E" if bull else "#FF3131" if bull is False else "#6B7585"};">{sc_}</div>'
                                     f'<div style="font-size:.68rem;color:#4B5563;margin-top:.2rem;">{comp["val"]}</div></div>', unsafe_allow_html=True)
 
-    # ── COMMAND CENTER (inchangé) ─────────────────────────────────────────
+    # ── COMMAND CENTER ────────────────────────────────────────────────────────
     def render_command_center(self, ptf: Dict, bench: Dict, mode_direct: bool, pm: PersistenceManager):
         st.markdown("## 🚀 Vue d'ensemble du portefeuille")
         perf_j_chain, perf_c_chain, base_cap = pm.compute_daily_performance(ptf["valeur_totale"])
@@ -1851,7 +1876,7 @@ class StreamlitUI:
                         f'<b>World MWR = {s(mwr_adj)}{mwr_adj:.2f}%</b> · '
                         f'<b style="color:{gc};">Votre Alpha = {s(gap)}{gap:.2f}%</b></div>', unsafe_allow_html=True)
 
-    # ── EQUITY CURVE (inchangé) ───────────────────────────────────────────
+    # ── EQUITY CURVE ─────────────────────────────────────────────────────────
     def render_equity_curve_section(self, ptf: Dict, regime: Dict, unified_h: Dict, unified_a: Dict, positions_conf: List[Dict]):
         st.markdown("## 📈 Historique de votre capital")
         col_eq, col_snap = st.columns([3, 1])
@@ -1898,7 +1923,7 @@ class StreamlitUI:
                 st.markdown(f'<div class="small">Dernier : {history["date"].iloc[-1]}</div>', unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── LEADERSHIP COMPARISON (inchangé) ──────────────────────────────────
+    # ── LEADERSHIP COMPARISON ────────────────────────────────────────────────
     def render_leadership_comparison(self, nom: str, ticker: str, color_sat: str = "#D4AF37"):
         st.markdown(f"### 📊 {nom} vs MSCI World --- Leadership hebdomadaire")
         with st.container():
@@ -1930,7 +1955,7 @@ class StreamlitUI:
         else:
             st.info("Données hebdomadaires insuffisantes. Revenez après quelques semaines.")
 
-    # ── RISK DASHBOARD (inchangé) ─────────────────────────────────────────
+    # ── RISK DASHBOARD ───────────────────────────────────────────────────────
     def render_risk_dashboard(self, ptf: Dict):
         st.markdown("## ⚠️ Gestion des risques")
         with st.expander("❓ Comment lire les indicateurs de risque ?", expanded=False):
@@ -2007,7 +2032,7 @@ class StreamlitUI:
                             f_names = ", ".join([short.get(f, f) for f in flags])
                             st.markdown(f'<div class="alert-box">🚨 <b>Trop de risque concentré</b> : {f_names} représente plus de 40% du risque total. Rééquilibrez.</div>', unsafe_allow_html=True)
 
-    # ── SATELLITE CARD PÉDAGOGIQUE (inchangé) ─────────────────────────────
+    # ── SATELLITE CARD PÉDAGOGIQUE ───────────────────────────────────────────
     def render_satellite_card_pedagogic(self, nom: str, ticker: str, unified: Dict, target_weight: Dict,
                                         regime: Dict, sent_rows: List[Dict], sector: str):
         color_map = {"hydrogen": "#F97316", "em_asia": "#6366F1"}
@@ -2080,7 +2105,7 @@ class StreamlitUI:
                 st.plotly_chart(fig_r, use_container_width=True, config={"displayModeBar": False})
                 st.caption("Courbe au-dessus de 0 = l'ETF surperforme le World depuis le début du suivi.")
 
-    # ── SENTINELLES & MACRO (inchangé) ─────────────────────────────────────
+    # ── SENTINELLES & MACRO ──────────────────────────────────────────────────
     def render_sentinelles_macro(self, ptf: Dict):
         st.markdown("## 🛰️ Radar Sectoriel & Macro-économie")
         col_s, col_m = st.columns([3, 2])
@@ -2122,7 +2147,7 @@ class StreamlitUI:
                     st.metric(lbl, "N/A")
             st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── SIMULATEUR FISCAL (inchangé) ───────────────────────────────────────
+    # ── SIMULATEUR FISCAL ────────────────────────────────────────────────────
     def render_fiscal_simulator(self, ptf: Dict):
         st.markdown("## 🧮 Simulateur Fiscal")
         st.caption("Calculez le montant net après impôts en cas de vente.")
@@ -2161,7 +2186,7 @@ class StreamlitUI:
                         f'<div><div class="kpi-label">Vous recevez</div><div class="kpi-value" style="color:#22C55E;">{net_sim:,.2f}€</div></div></div>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── v5.6 : ONGLET TRANSACTIONS (avec liste déroulante complète) ───────
+    # ── ONGLET TRANSACTIONS ──────────────────────────────────────────────────
     def render_transactions_tab(self):
         st.markdown("## 📈 Journal des Transactions")
         st.caption("Enregistrez vos ordres BUY/SELL. Le moteur reconstruit automatiquement le portefeuille.")
@@ -2237,7 +2262,7 @@ class StreamlitUI:
                 st.success("✅ portfolio_positions.json mis à jour depuis les transactions !")
                 st.rerun()
 
-    # ── NOUVEAU : ONGLET SCREENER ─────────────────────────────────────────
+    # ── ONGLET SCREENER ──────────────────────────────────────────────────────
     def render_screener_tab(self):
         st.markdown("## 🔍 Screener Quantitatif d'ETFs")
         st.caption("Scoring multi-facteurs (0-100) basé sur momentum 6M, force relative, Sharpe, volatilité, drawdown, RSI, tendance.")
@@ -2267,23 +2292,7 @@ class StreamlitUI:
         if st.button("📊 Afficher tous les ETFs", use_container_width=True):
             st.dataframe(df_scores, use_container_width=True, hide_index=True)
 
-    # ── NOUVEAU : ARBITRAGE WIDGET ────────────────────────────────────────
-    def render_arbitrage_widget(self):
-        if "positions" not in st.session_state:
-            return
-        holdings = [p.get("_tk_id", p.get("ticker")) for p in st.session_state["positions"] if p.get("valeur",0) > 0]
-        holdings = list(dict.fromkeys([h for h in holdings if h in ETF_LIBRARY]))
-        opps = self.signal.get_arbitrage_opportunities(holdings)
-        if opps:
-            st.markdown("### 🔄 Alertes d'arbitrage")
-            for opp in opps:
-                st.markdown(f'<div class="arb-sell">🚨 <b>Opportunité de rotation</b><br>'
-                            f'Vendre <b>{opp["sell_name"]}</b> (score actuel) → Acheter <b>{opp["buy_name"]}</b><br>'
-                            f'Gain potentiel estimé : +{opp["gain_potential"]} points de score</div>', unsafe_allow_html=True)
-        else:
-            st.markdown('<div class="arb-neutral">✅ Aucune opportunité d’arbitrage significative détectée.</div>', unsafe_allow_html=True)
-
-    # ── NOUVEAU : POSITION SIZING MODELER ─────────────────────────────────
+    # ── POSITION SIZING MODELER ──────────────────────────────────────────────
     def render_position_sizing(self, ptf: Dict, regime_label: str):
         st.markdown("### ⚖️ Position Sizing Modeler")
         st.caption("Poids cibles optimaux suggérés (Core / Satellite) en fonction du régime macro.")
@@ -2315,7 +2324,23 @@ class StreamlitUI:
             })
         st.dataframe(pd.DataFrame(suggestions), use_container_width=True, hide_index=True)
 
-    # ── FOOTER (inchangé) ─────────────────────────────────────────────────
+    # ── ARBITRAGE WIDGET ─────────────────────────────────────────────────────
+    def render_arbitrage_widget(self):
+        if "positions" not in st.session_state:
+            return
+        holdings = [p.get("_tk_id", p.get("ticker")) for p in st.session_state["positions"] if p.get("valeur",0) > 0]
+        holdings = list(dict.fromkeys([h for h in holdings if h in ETF_LIBRARY]))
+        opps = self.signal.get_arbitrage_opportunities(holdings)
+        if opps:
+            st.markdown("### 🔄 Alertes d'arbitrage")
+            for opp in opps:
+                st.markdown(f'<div class="arb-sell">🚨 <b>Opportunité de rotation</b><br>'
+                            f'Vendre <b>{opp["sell_name"]}</b> (score actuel) → Acheter <b>{opp["buy_name"]}</b><br>'
+                            f'Gain potentiel estimé : +{opp["gain_potential"]} points de score</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="arb-neutral">✅ Aucune opportunité d’arbitrage significative détectée.</div>', unsafe_allow_html=True)
+
+    # ── FOOTER ───────────────────────────────────────────────────────────────
     def render_footer(self, mode_direct: bool, capital: float, score_h: int, score_a: int, regime_label: str, live_ok: int, live_total: int):
         st.markdown("---")
         col_f1, col_f2 = st.columns([4, 1])
@@ -2330,7 +2355,6 @@ class StreamlitUI:
             if st.button("🔄 Rafraîchir", use_container_width=True):
                 st.cache_data.clear()
                 st.rerun()
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MODULE 16 : MAIN (avec trois onglets : Dashboard, Transactions, Screener)
@@ -2414,6 +2438,7 @@ def main():
         live_ok = sum(1 for v in dm.live.values() if v.get("prix"))
         live_total = len(dm.live)
 
+    # Création des onglets
     tab_dashboard, tab_transactions, tab_screener = st.tabs(["📊 Dashboard", "📈 Transactions", "🔍 Screener"])
 
     with tab_dashboard:
