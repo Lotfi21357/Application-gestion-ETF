@@ -13,6 +13,7 @@
 #   • Optimisation mémoire et cache pour mobile
 #   • Toutes les fonctionnalités v5.5 conservées (MWR, fallback or, transactions...)
 #   • NOUVEAU : Suppression d'un ETF entier depuis la sidebar
+#   • NOUVEAU : Projection des dates d'atteinte des objectifs (AV 220k€, PEA 330k€)
 #
 # Requis (requirements.txt) :
 #   streamlit yfinance pandas numpy plotly PyGithub scipy ta requests_cache sqlalchemy tzdata
@@ -984,7 +985,7 @@ class QuantRiskEngine:
         return float(np.sqrt(w @ cov @ w))
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 10 : PORTFOLIO ENGINE (inchangé v5.5)
+# MODULE 10 : PORTFOLIO ENGINE (avec calcul de CAGR et projection)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def enrich_positions(raw_positions: List[Dict]) -> List[Dict]:
@@ -1260,6 +1261,101 @@ class PortfolioEngine:
         if ps >= 2: signals.append(f"{ps} proxies<SMA20")
         if signals: return f"🔄 Phase 3 : Rotation --- Sécuriser les gains ({', '.join(signals)})", "#78350F"
         return "🚀 Phase 2 : Alpha --- Battre le MSCI World", "#14532D"
+
+    # ── NOUVELLES MÉTHODES POUR LA PROJECTION DES OBJECTIFS ────────────────────
+    def _compute_cagr_for_ticker(self, ticker: str, start_date: datetime = DATE_DEBUT) -> Tuple[float, bool]:
+        """
+        Calcule le CAGR annualisé pour un ticker donné depuis start_date.
+        Retourne (taux, fallback_utilisé) où taux est en décimal (0.07 = 7%).
+        Si les données sont insuffisantes ou si le CAGR calculé est <= 0.01,
+        on utilise un taux par défaut de 7% (0.07) et fallback = True.
+        """
+        df = self.dm.data.get(ticker)
+        if df is None or df.empty or "Close" not in df.columns:
+            return 0.07, True
+        close = df["Close"].dropna()
+        if len(close) < 2:
+            return 0.07, True
+        # Déterminer la première date disponible après start_date
+        start_date_str = start_date.strftime("%Y-%m-%d")
+        if start_date_str in close.index:
+            price_start = close.loc[start_date_str]
+        else:
+            # Prendre la première date >= start_date
+            idx = close.index[close.index >= start_date_str]
+            if len(idx) == 0:
+                # Sinon prendre la première donnée disponible
+                price_start = close.iloc[0]
+                start_date_effective = close.index[0]
+            else:
+                price_start = close.loc[idx[0]]
+                start_date_effective = idx[0]
+        price_end = close.iloc[-1]
+        if price_start <= 0 or price_end <= 0:
+            return 0.07, True
+        # Calcul du temps en années
+        end_date = close.index[-1]
+        if 'start_date_effective' not in locals():
+            start_date_effective = start_date
+        days = (end_date - start_date_effective).days
+        if days <= 0:
+            return 0.07, True
+        years = days / 365.25
+        if years <= 0:
+            return 0.07, True
+        cagr = (price_end / price_start) ** (1.0 / years) - 1.0
+        if np.isnan(cagr) or cagr <= 0.01:
+            return 0.07, True
+        return cagr, False
+
+    def compute_envelope_cagr(self, envelope: str, positions_calc: List[Dict]) -> Tuple[float, bool]:
+        """
+        Calcule le CAGR pondéré pour une enveloppe (PEA ou AV).
+        Pour PEA : utilise uniquement DCAM.PA (ETF MSCI World PEA) et son CAGR.
+        Pour AV : pondère les CAGR des actifs de l'enveloppe (MWRD.PA, ANRJ.PA, AASI.PA, XGDE.PA et autres éventuels)
+        par leur valeur actuelle dans l'enveloppe.
+        Retourne (taux, fallback_utilisé) où fallback_utilisé est True si un taux par défaut a été utilisé
+        (soit pour l'ensemble de l'enveloppe, soit pour un ou plusieurs actifs).
+        """
+        # Filtrer les positions de l'enveloppe
+        env_positions = [p for p in positions_calc if p.get("enveloppe") == envelope and p.get("valeur",0) > 0]
+        if not env_positions:
+            # Pas de positions dans cette enveloppe → impossible de calculer, on retourne le taux par défaut
+            return 0.07, True
+
+        if envelope == "PEA":
+            # Le PEA ne contient normalement que DCAM.PA (ou éventuellement d'autres, mais on se base sur DCAM.PA)
+            # On prend la première position (normalement DCAM.PA)
+            pea_ticker = None
+            for p in env_positions:
+                if p.get("ticker") and "DCAM.PA" in p["ticker"]:
+                    pea_ticker = "DCAM.PA"
+                    break
+            if not pea_ticker:
+                pea_ticker = env_positions[0].get("ticker")
+            if pea_ticker:
+                cagr, fall = self._compute_cagr_for_ticker(pea_ticker, DATE_DEBUT)
+                return cagr, fall
+            else:
+                return 0.07, True
+        else:  # AV
+            total_value = sum(p["valeur"] for p in env_positions)
+            if total_value <= 0:
+                return 0.07, True
+            weighted_cagr = 0.0
+            any_fallback = False
+            for pos in env_positions:
+                ticker = pos.get("ticker")
+                if not ticker:
+                    continue
+                weight = pos["valeur"] / total_value
+                cagr, fall = self._compute_cagr_for_ticker(ticker, DATE_DEBUT)
+                if fall:
+                    any_fallback = True
+                weighted_cagr += weight * cagr
+            if weighted_cagr <= 0.01:
+                return 0.07, True
+            return weighted_cagr, any_fallback
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MODULE 11 : PEDAGOGIC ENGINE (inchangé v5.5)
@@ -1608,7 +1704,7 @@ def plot_relative_perf(dm: DataManager, ticker: str, nom: str) -> Optional[go.Fi
     return fig
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 15 : STREAMLIT UI v5.6 (avec suppression d'ETF)
+# MODULE 15 : STREAMLIT UI v5.6 (avec suppression d'ETF et projection objectifs)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class StreamlitUI:
@@ -1691,7 +1787,7 @@ class StreamlitUI:
                 st.rerun()
 
         st.sidebar.markdown("---")
-        # --- NOUVEAU BLOC : SUPPRESSION D'UN ETF ---
+        # Bloc suppression d'ETF
         st.sidebar.markdown("### 🗑️ Supprimer un ETF")
         config_manager = PortfolioConfigManager()
         current_positions = config_manager.load_positions()
@@ -1792,7 +1888,7 @@ class StreamlitUI:
                                     f'<div style="font-family:Space Mono;font-weight:700;color:{"#22C55E" if bull else "#FF3131" if bull is False else "#6B7585"};">{sc_}</div>'
                                     f'<div style="font-size:.68rem;color:#4B5563;margin-top:.2rem;">{comp["val"]}</div></div>', unsafe_allow_html=True)
 
-    # ── COMMAND CENTER ────────────────────────────────────────────────────────
+    # ── COMMAND CENTER (avec projection objectifs) ────────────────────────────
     def render_command_center(self, ptf: Dict, bench: Dict, mode_direct: bool, pm: PersistenceManager):
         st.markdown("## 🚀 Vue d'ensemble du portefeuille")
         perf_j_chain, perf_c_chain, base_cap = pm.compute_daily_performance(ptf["valeur_totale"])
@@ -1841,6 +1937,72 @@ class StreamlitUI:
             else:
                 body_bench = '<div class="kpi-value">N/A</div>'
             st.markdown(f'<div class="card card-blue"><div class="kpi-label">MSCI World MWR<span class="mwr-badge">AJUSTÉ</span><span class="live-badge">LIVE</span></div>{body_bench}</div>', unsafe_allow_html=True)
+
+        # NOUVEAU : Affichage des projections d'objectifs
+        st.markdown("### 🎯 Objectifs financiers")
+        col_pea_obj, col_av_obj = st.columns(2)
+
+        # Objectif PEA
+        pea_value = ptf["val_env"].get("PEA", 0.0)
+        pea_target = 330_000.0
+        if pea_value > 0:
+            pea_cagr, pea_fallback = self.pe.compute_envelope_cagr("PEA", ptf["positions"])
+            if pea_value < pea_target:
+                # Calcul du temps restant
+                if pea_cagr > 0.01:
+                    t_years = np.log(pea_target / pea_value) / np.log(1 + pea_cagr)
+                    t_days = t_years * 365.25
+                    target_date = datetime.now() + timedelta(days=t_days)
+                    date_str = target_date.strftime("%B %Y") if t_days > 30 else target_date.strftime("%d %B %Y")
+                    if pea_fallback:
+                        note = " (taux standard 7%)"
+                    else:
+                        note = ""
+                    pea_progress = f"{pea_value:,.0f}€ / {pea_target:,.0f}€ → estimé {date_str}{note}"
+                else:
+                    pea_progress = f"{pea_value:,.0f}€ / {pea_target:,.0f}€ → taux insuffisant, projection impossible"
+            else:
+                pea_progress = f"{pea_value:,.0f}€ / {pea_target:,.0f}€ → objectif atteint !"
+        else:
+            pea_progress = "Aucune position en PEA"
+
+        with col_pea_obj:
+            st.markdown(f'<div class="card card-gold">'
+                        f'<div class="kpi-label">🏦 Objectif PEA</div>'
+                        f'<div class="kpi-value">{pea_target:,.0f}€</div>'
+                        f'<div class="small">{pea_progress}</div>'
+                        f'</div>', unsafe_allow_html=True)
+
+        # Objectif AV
+        av_value = ptf["val_env"].get("AV", 0.0)
+        av_target = 220_000.0
+        if av_value > 0:
+            av_cagr, av_fallback = self.pe.compute_envelope_cagr("AV", ptf["positions"])
+            if av_value < av_target:
+                if av_cagr > 0.01:
+                    t_years = np.log(av_target / av_value) / np.log(1 + av_cagr)
+                    t_days = t_years * 365.25
+                    target_date = datetime.now() + timedelta(days=t_days)
+                    date_str = target_date.strftime("%B %Y") if t_days > 30 else target_date.strftime("%d %B %Y")
+                    if av_fallback:
+                        note = " (taux standard 7%)"
+                    else:
+                        note = ""
+                    av_progress = f"{av_value:,.0f}€ / {av_target:,.0f}€ → estimé {date_str}{note}"
+                else:
+                    av_progress = f"{av_value:,.0f}€ / {av_target:,.0f}€ → taux insuffisant, projection impossible"
+            else:
+                av_progress = f"{av_value:,.0f}€ / {av_target:,.0f}€ → objectif atteint !"
+        else:
+            av_progress = "Aucune position en AV"
+
+        with col_av_obj:
+            st.markdown(f'<div class="card card-gold">'
+                        f'<div class="kpi-label">📈 Objectif Assurance-Vie</div>'
+                        f'<div class="kpi-value">{av_target:,.0f}€</div>'
+                        f'<div class="small">{av_progress}</div>'
+                        f'</div>', unsafe_allow_html=True)
+
         st.markdown("### 📊 Mes positions")
         col_t, col_p = st.columns([3, 2])
         with col_t:
