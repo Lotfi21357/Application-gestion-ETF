@@ -14,6 +14,16 @@
 #   • Toutes les fonctionnalités v5.5 conservées (MWR, fallback or, transactions...)
 #   • NOUVEAU : Suppression d'un ETF entier depuis la sidebar
 #   • NOUVEAU : Projection des dates d'atteinte des objectifs (AV 220k€, PEA 330k€)
+#   • REFONTE COMPLÈTE du moteur quantitatif (AnalyticsEngine) :
+#       - Séparation stricte entre métriques propres à l'actif et relatives au benchmark
+#       - Utilisation prioritaire de "Adj Close"
+#       - Fenêtres explicites : 1M, 3M, 6M, 1Y, 3Y
+#       - Sharpe annualisé correct
+#       - Sortino ratio avec downside deviation institutionnelle
+#       - RSI Wilder (smoothing exponentiel)
+#       - Max Drawdown 1Y, 3Y, depuis inception
+#       - Information Ratio
+#       - Force relative basée sur momentum 6M (log-ratio)
 #
 # Requis (requirements.txt) :
 #   streamlit yfinance pandas numpy plotly PyGithub scipy ta requests_cache sqlalchemy tzdata
@@ -304,7 +314,7 @@ class DataManager:
         self._log_returns_cache = result
         return result
 
-    # Helpers pour compatibilité avec l'ancien code
+    # Helpers pour compatibilité avec l'ancien code (utilisés par d'autres modules)
     def sma(self, series: pd.Series, n: int) -> Optional[float]:
         s = series.dropna()
         return float(s.rolling(n).mean().iloc[-1]) if len(s) >= n else None
@@ -327,59 +337,300 @@ class DataManager:
         return None
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 4 : ANALYTICS ENGINE (vectorisé)
+# MODULE 4 : ANALYTICS ENGINE (version institutionnelle corrigée)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class AnalyticsEngine:
+    """
+    Moteur d'analyse quantitative vectorisé pour ETF.
+    Toutes les métriques utilisent des fenêtres temporelles explicites et cohérentes :
+    - 21 jours ouvrés  → 1 mois
+    - 63 jours ouvrés  → 3 mois
+    - 126 jours ouvrés → 6 mois
+    - 252 jours ouvrés → 1 an
+    - 756 jours ouvrés → 3 ans
+
+    Utilise 'Adj Close' en priorité, sinon 'Close'.
+    Benchmark pour la force relative et l'information ratio : MWRD.PA (MSCI World AV).
+    Taux sans risque par défaut : 2.5% annualisé (0.025).
+    """
+
+    # Constantes de fenêtres (en jours ouvrés)
+    WINDOW_1M = 21
+    WINDOW_3M = 63
+    WINDOW_6M = 126
+    WINDOW_1Y = 252
+    WINDOW_3Y = 756
+
+    # Taux sans risque (annualisé)
+    RISK_FREE_RATE = 0.025
+
     def __init__(self, dm: DataManager):
         self.dm = dm
+        # Récupération du benchmark principal (MWRD.PA)
+        self.benchmark_ticker = "MWRD.PA"
+        self.benchmark_df = dm.data.get(self.benchmark_ticker)
+        if self.benchmark_df is None or self.benchmark_df.empty:
+            for wt in WORLD_TICKERS:
+                self.benchmark_df = dm.data.get(wt)
+                if self.benchmark_df is not None and not self.benchmark_df.empty:
+                    self.benchmark_ticker = wt
+                    break
 
-    def compute_all_metrics(self, ticker: str) -> dict:
+    # -------------------------------------------------------------------------
+    # Méthodes internes de nettoyage et extraction des séries
+    # -------------------------------------------------------------------------
+    def _get_price_column(self, df: pd.DataFrame) -> str:
+        """Retourne 'Adj Close' si disponible, sinon 'Close'."""
+        if "Adj Close" in df.columns:
+            return "Adj Close"
+        return "Close"
+
+    def _get_asset_series(self, ticker: str) -> pd.Series:
+        """Retourne la série de prix ajustés pour l'actif seul, sans alignement."""
         df = self.dm.data.get(ticker)
-        if df is None or df.empty or "Close" not in df.columns:
+        if df is None or df.empty:
+            return pd.Series(dtype=float)
+        price_col = self._get_price_column(df)
+        series = df[price_col].dropna().copy()
+        # Tri par date croissante
+        series = series.sort_index()
+        return series
+
+    def _align_with_benchmark(self, ticker: str) -> Tuple[pd.Series, pd.Series]:
+        """Retourne (asset_series, benchmark_series) alignées sur les dates communes."""
+        asset = self._get_asset_series(ticker)
+        if asset.empty:
+            return pd.Series(dtype=float), pd.Series(dtype=float)
+        bench = self._get_asset_series(self.benchmark_ticker) if self.benchmark_df is not None else pd.Series(dtype=float)
+        if bench.empty:
+            return asset, pd.Series(dtype=float)
+        common_idx = asset.index.intersection(bench.index)
+        if len(common_idx) == 0:
+            return asset, pd.Series(dtype=float)
+        return asset.loc[common_idx], bench.loc[common_idx]
+
+    # -------------------------------------------------------------------------
+    # 1. Momentum sur différentes périodes (uniquement sur l'actif)
+    # -------------------------------------------------------------------------
+    def _compute_momentum(self, close: pd.Series, window: int) -> float:
+        """Momentum sur window jours : (P_t / P_{t-window}) - 1, en pourcentage."""
+        if len(close) < window + 1:
+            return np.nan
+        p0 = close.iloc[-window]
+        p1 = close.iloc[-1]
+        return (p1 / p0 - 1.0) * 100.0
+
+    def compute_momentum_1m(self, ticker: str) -> float:
+        close = self._get_asset_series(ticker)
+        return self._compute_momentum(close, self.WINDOW_1M)
+
+    def compute_momentum_3m(self, ticker: str) -> float:
+        close = self._get_asset_series(ticker)
+        return self._compute_momentum(close, self.WINDOW_3M)
+
+    def compute_momentum_6m(self, ticker: str) -> float:
+        close = self._get_asset_series(ticker)
+        return self._compute_momentum(close, self.WINDOW_6M)
+
+    # -------------------------------------------------------------------------
+    # 2. Force relative (vs benchmark) basée sur les momentum 6M (log-ratio)
+    # -------------------------------------------------------------------------
+    def compute_relative_strength(self, ticker: str) -> float:
+        """
+        Relative Strength = ln((ETF_t/ETF_{t-126}) / (Bench_t/Bench_{t-126})) * 100.
+        >0 signifie surperformance sur 6 mois.
+        """
+        asset, bench = self._align_with_benchmark(ticker)
+        if bench.empty or len(asset) < self.WINDOW_6M + 1 or len(bench) < self.WINDOW_6M + 1:
+            return np.nan
+        etf_ratio = asset.iloc[-1] / asset.iloc[-self.WINDOW_6M]
+        bench_ratio = bench.iloc[-1] / bench.iloc[-self.WINDOW_6M]
+        if bench_ratio <= 0 or etf_ratio <= 0:
+            return np.nan
+        return np.log(etf_ratio / bench_ratio) * 100.0
+
+    # -------------------------------------------------------------------------
+    # 3. Volatilité annualisée (sur 1 an, uniquement sur l'actif)
+    # -------------------------------------------------------------------------
+    def compute_volatility(self, ticker: str, window: int = WINDOW_1Y) -> float:
+        """Volatilité annualisée (écart-type des rendements journaliers * sqrt(252)). Fenêtre glissante."""
+        close = self._get_asset_series(ticker)
+        if len(close) < window + 1:
+            return np.nan
+        returns = close.pct_change().dropna().iloc[-window:]
+        if len(returns) < 10:
+            return np.nan
+        return returns.std() * np.sqrt(252) * 100.0
+
+    # -------------------------------------------------------------------------
+    # 4. Sharpe ratio annualisé (avec taux sans risque, fenêtre ajustée)
+    # -------------------------------------------------------------------------
+    def compute_sharpe(self, ticker: str) -> float:
+        """
+        Sharpe annualisé = (Rendement annualisé - RF) / Volatilité annualisée.
+        Rendement annualisé calculé sur une fenêtre de 1 an (ou moins si historique insuffisant),
+        annualisé selon la formule (1+R)^(252/n) - 1.
+        """
+        close = self._get_asset_series(ticker)
+        if len(close) < 10:
+            return np.nan
+        n = min(len(close) - 1, self.WINDOW_1Y)
+        if n <= 0:
+            return np.nan
+        # Rendement sur n jours
+        ret = close.iloc[-1] / close.iloc[-n] - 1.0
+        # Annualisation
+        ann_return = (1.0 + ret) ** (252.0 / n) - 1.0
+        # Volatilité annualisée sur la même fenêtre
+        returns = close.pct_change().dropna().iloc[-n:]
+        if len(returns) < 10:
+            return np.nan
+        ann_vol = returns.std() * np.sqrt(252)
+        if ann_vol == 0 or np.isnan(ann_vol):
+            return np.nan
+        return (ann_return - self.RISK_FREE_RATE) / ann_vol
+
+    # -------------------------------------------------------------------------
+    # 5. Sortino ratio (downside deviation institutionnelle)
+    # -------------------------------------------------------------------------
+    def compute_sortino(self, ticker: str) -> float:
+        """
+        Sortino ratio = (Rendement annualisé - RF) / Downside Deviation annualisée.
+        Downside deviation = sqrt(moyenne des carrés des rendements en dessous de RF).
+        """
+        close = self._get_asset_series(ticker)
+        if len(close) < 10:
+            return np.nan
+        n = min(len(close) - 1, self.WINDOW_1Y)
+        if n <= 0:
+            return np.nan
+        # Rendement annualisé
+        ret = close.iloc[-1] / close.iloc[-n] - 1.0
+        ann_return = (1.0 + ret) ** (252.0 / n) - 1.0
+        # Rendements journaliers sur la même fenêtre
+        returns = close.pct_change().dropna().iloc[-n:]
+        if len(returns) < 10:
+            return np.nan
+        daily_rf = (1.0 + self.RISK_FREE_RATE) ** (1.0 / 252) - 1.0
+        downside = np.minimum(returns - daily_rf, 0)
+        downside_dev = np.sqrt(np.mean(downside**2)) * np.sqrt(252)
+        if downside_dev == 0 or np.isnan(downside_dev):
+            return np.nan
+        return (ann_return - self.RISK_FREE_RATE) / downside_dev
+
+    # -------------------------------------------------------------------------
+    # 6. Information Ratio (vs benchmark)
+    # -------------------------------------------------------------------------
+    def compute_information_ratio(self, ticker: str) -> float:
+        """
+        Information Ratio = (Rendement annualisé de l'actif - Rendement annualisé du benchmark) /
+                            Tracking Error (vol des différences journalières)
+        Fenêtre : 1 an (ou moins).
+        """
+        asset, bench = self._align_with_benchmark(ticker)
+        if bench.empty or len(asset) < 10 or len(bench) < 10:
+            return np.nan
+        n = min(min(len(asset)-1, len(bench)-1), self.WINDOW_1Y)
+        if n <= 0:
+            return np.nan
+        # Rendements annualisés
+        ret_asset = asset.iloc[-1] / asset.iloc[-n] - 1.0
+        ann_ret_asset = (1.0 + ret_asset) ** (252.0 / n) - 1.0
+        ret_bench = bench.iloc[-1] / bench.iloc[-n] - 1.0
+        ann_ret_bench = (1.0 + ret_bench) ** (252.0 / n) - 1.0
+        # Rendements journaliers
+        asset_returns = asset.pct_change().dropna().iloc[-n:]
+        bench_returns = bench.pct_change().dropna().iloc[-n:]
+        common = asset_returns.index.intersection(bench_returns.index)
+        if len(common) < 10:
+            return np.nan
+        diff = asset_returns.loc[common] - bench_returns.loc[common]
+        tracking_error = diff.std() * np.sqrt(252)
+        if tracking_error == 0 or np.isnan(tracking_error):
+            return np.nan
+        return (ann_ret_asset - ann_ret_bench) / tracking_error
+
+    # -------------------------------------------------------------------------
+    # 7. Drawdowns (1Y, 3Y, since inception) sur l'actif seul
+    # -------------------------------------------------------------------------
+    def _compute_max_drawdown(self, series: pd.Series, window: int = None) -> float:
+        """Maximum Drawdown en pourcentage (négatif). window=None => tout l'historique."""
+        if len(series) < 2:
+            return np.nan
+        if window is not None:
+            series = series.iloc[-window:]
+        rolling_max = series.cummax()
+        drawdown = (series / rolling_max - 1.0)
+        return drawdown.min() * 100.0
+
+    def compute_max_drawdown_1y(self, ticker: str) -> float:
+        close = self._get_asset_series(ticker)
+        return self._compute_max_drawdown(close, self.WINDOW_1Y)
+
+    def compute_max_drawdown_3y(self, ticker: str) -> float:
+        close = self._get_asset_series(ticker)
+        return self._compute_max_drawdown(close, self.WINDOW_3Y)
+
+    def compute_max_drawdown_since_inception(self, ticker: str) -> float:
+        close = self._get_asset_series(ticker)
+        return self._compute_max_drawdown(close, None)
+
+    # -------------------------------------------------------------------------
+    # 8. RSI de Wilder (smoothing exponentiel)
+    # -------------------------------------------------------------------------
+    def compute_rsi(self, ticker: str, period: int = 14) -> float:
+        """RSI de Wilder utilisant le lissage exponentiel (EWM)."""
+        close = self._get_asset_series(ticker)
+        if len(close) < period + 1:
+            return np.nan
+        delta = close.diff()
+        # Gain et loss avec lissage Wilder (smoothing factor = 1/period)
+        gain = delta.clip(lower=0).ewm(alpha=1/period, adjust=False).mean()
+        loss = (-delta.clip(upper=0)).ewm(alpha=1/period, adjust=False).mean()
+        rs = gain / loss.replace(0, np.nan)
+        rsi = 100 - (100 / (1 + rs))
+        return float(rsi.iloc[-1]) if not rsi.empty and not np.isnan(rsi.iloc[-1]) else np.nan
+
+    # -------------------------------------------------------------------------
+    # 9. Distances aux SMA (sur l'actif seul)
+    # -------------------------------------------------------------------------
+    def compute_distance_sma(self, ticker: str, window: int) -> float:
+        close = self._get_asset_series(ticker)
+        if len(close) < window:
+            return np.nan
+        sma = close.rolling(window).mean().iloc[-1]
+        if np.isnan(sma) or sma == 0:
+            return np.nan
+        return ((close.iloc[-1] / sma) - 1.0) * 100.0
+
+    # -------------------------------------------------------------------------
+    # 10. Méthode unifiée retournant toutes les métriques
+    # -------------------------------------------------------------------------
+    def compute_all_metrics(self, ticker: str) -> dict:
+        """Retourne un dictionnaire avec toutes les métriques (compatible avec SignalEngine)."""
+        close = self._get_asset_series(ticker)
+        if close.empty:
             return {}
-        close = df["Close"].dropna()
-        if len(close) < 30:
-            return {}
-        returns = close.pct_change().dropna()
-        # Momentum
-        mom_1m = (close.iloc[-1] / close.iloc[-21] - 1) * 100 if len(close) >= 21 else np.nan
-        mom_3m = (close.iloc[-1] / close.iloc[-63] - 1) * 100 if len(close) >= 63 else np.nan
-        mom_6m = (close.iloc[-1] / close.iloc[-126] - 1) * 100 if len(close) >= 126 else np.nan
-        # Volatilité annualisée
-        vol = returns.std() * np.sqrt(252) * 100
-        # Max Drawdown
-        cummax = close.cummax()
-        dd = (close / cummax - 1) * 100
-        max_dd = dd.min()
-        # Sharpe
-        sharpe = (returns.mean() / returns.std()) * np.sqrt(252) if returns.std() != 0 else np.nan
-        # RSI
-        rsi = ta.momentum.RSIIndicator(close, window=14).rsi().iloc[-1]
-        # Distances SMA
-        sma20 = close.rolling(20).mean().iloc[-1]
-        sma50 = close.rolling(50).mean().iloc[-1]
-        sma200 = close.rolling(200).mean().iloc[-1] if len(close) >= 200 else np.nan
-        dist_sma20 = (close.iloc[-1] / sma20 - 1) * 100 if not pd.isna(sma20) else np.nan
-        dist_sma50 = (close.iloc[-1] / sma50 - 1) * 100 if not pd.isna(sma50) else np.nan
-        # Force relative vs MSCI World (CW8.PA)
-        bench_df = self.dm.data.get("CW8.PA")
-        if bench_df is not None and not bench_df.empty and "Close" in bench_df.columns:
-            bench_close = bench_df["Close"].dropna()
-            common = close.index.intersection(bench_close.index)
-            if len(common) >= 21:
-                ratio = close.loc[common] / bench_close.loc[common]
-                rel_strength = (ratio.iloc[-1] / ratio.iloc[-21] - 1) * 100
-            else:
-                rel_strength = np.nan
-        else:
-            rel_strength = np.nan
-        return {
-            "mom_1m": mom_1m, "mom_3m": mom_3m, "mom_6m": mom_6m,
-            "volatility": vol, "max_drawdown": max_dd, "sharpe": sharpe,
-            "rsi": rsi, "dist_sma20": dist_sma20, "dist_sma50": dist_sma50,
-            "rel_strength": rel_strength, "price": close.iloc[-1]
+        metrics = {
+            "price": close.iloc[-1] if not close.empty else np.nan,
+            "mom_1m": self.compute_momentum_1m(ticker),
+            "mom_3m": self.compute_momentum_3m(ticker),
+            "mom_6m": self.compute_momentum_6m(ticker),
+            "rel_strength": self.compute_relative_strength(ticker),
+            "volatility": self.compute_volatility(ticker),
+            "sharpe": self.compute_sharpe(ticker),
+            "sortino": self.compute_sortino(ticker),
+            "information_ratio": self.compute_information_ratio(ticker),
+            "max_drawdown_1y": self.compute_max_drawdown_1y(ticker),
+            "max_drawdown_3y": self.compute_max_drawdown_3y(ticker),
+            "max_drawdown_since": self.compute_max_drawdown_since_inception(ticker),
+            "max_drawdown": self.compute_max_drawdown_1y(ticker),  # Pour compatibilité scoring
+            "rsi": self.compute_rsi(ticker),
+            "dist_sma20": self.compute_distance_sma(ticker, 20),
+            "dist_sma50": self.compute_distance_sma(ticker, 50),
         }
+        return metrics
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MODULE 5 : SIGNAL ENGINE (scoring + arbitrage)
@@ -420,8 +671,8 @@ class SignalEngine:
         rsi = m.get("rsi", 50)
         if 55 <= rsi <= 70: score += 5
         elif rsi > 70: score += 2
-        # Drawdown (10 pts)
-        dd = m.get("max_drawdown", -50)
+        # Drawdown 1Y (10 pts)
+        dd = m.get("max_drawdown_1y", -50)
         if dd > -10: score += 10
         elif dd > -20: score += 5
         # Volatilité (10 pts)
@@ -1948,7 +2199,6 @@ class StreamlitUI:
         if pea_value > 0:
             pea_cagr, pea_fallback = self.pe.compute_envelope_cagr("PEA", ptf["positions"])
             if pea_value < pea_target:
-                # Calcul du temps restant
                 if pea_cagr > 0.01:
                     t_years = np.log(pea_target / pea_value) / np.log(1 + pea_cagr)
                     t_days = t_years * 365.25
@@ -2446,7 +2696,7 @@ class StreamlitUI:
                     "Force Relative": f"{res['metrics'].get('rel_strength',0):.1f}%",
                     "Volatilité": f"{res['metrics'].get('volatility',0):.1f}%",
                     "Sharpe": f"{res['metrics'].get('sharpe',0):.2f}",
-                    "Drawdown": f"{res['metrics'].get('max_drawdown',0):.1f}%"
+                    "Drawdown": f"{res['metrics'].get('max_drawdown_1y',0):.1f}%"
                 })
             df_scores = pd.DataFrame(scores).sort_values("Score", ascending=False)
         top_n = st.slider("Nombre d'ETFs à afficher", min_value=5, max_value=len(df_scores), value=15, step=5)
