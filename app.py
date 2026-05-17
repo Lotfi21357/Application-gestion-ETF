@@ -24,6 +24,7 @@
 #       - Max Drawdown 1Y, 3Y, depuis inception
 #       - Information Ratio
 #       - Force relative basée sur momentum 6M (log-ratio)
+#       - AJOUT : Corrélation glissante sur log-returns (1M, 3M, 6M, 1Y)
 #
 # Requis (requirements.txt) :
 #   streamlit yfinance pandas numpy plotly PyGithub scipy ta requests_cache sqlalchemy tzdata
@@ -104,7 +105,7 @@ section[data-testid="stSidebar"] { background-color: #22252E; border-right: 1px 
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 2 : CONSTANTES & CONFIGURATION
+# MODULE 2 : CONSTANTES & CONFIGURATION (CORRIGÉ : XU61.DE)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ETF_LIBRARY étendu (55+ ETFs)
@@ -122,7 +123,7 @@ ETF_LIBRARY: Dict[str, Dict] = {
     "LYXHEA.PA": {"nom": "Europe Healthcare", "name": "Amundi STOXX Europe 600 Healthcare", "yf": "LYXHEA.PA", "yf_fallbacks": [], "category": "Sector", "theme": "Health", "region": "Europe", "risk_type": "Defensive", "enveloppe": "AV", "initial_target": 0.0},
     "SPHC.PA": {"nom": "S&P 500 Hedged", "name": "Lyxor S&P 500 UCITS - Daily Hedged", "yf": "SPHC.PA", "yf_fallbacks": [], "category": "Core", "theme": "Large Cap", "region": "USA", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
     "WSRI.PA": {"nom": "World SRI", "name": "Amundi MSCI World SRI Climate Net", "yf": "WSRI.PA", "yf_fallbacks": [], "category": "ESG", "theme": "Sustainability", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "XU61.PA": {"nom": "Global ESG", "name": "BNP Paribas EASY ECPI Global ESG", "yf": "XU61.PA", "yf_fallbacks": [], "category": "ESG", "theme": "Infrastructure", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "XU61.DE": {"nom": "Global ESG Infra", "name": "BNP Paribas Easy ECPI Global ESG Infrastructure UCITS ETF", "yf": "XU61.DE", "yf_fallbacks": [], "category": "ESG", "theme": "Infrastructure", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
     "USTH.PA": {"nom": "Nasdaq Hedged", "name": "MULTI UNITS LUXEMBOURG - Lyxor Nasdaq Hedged", "yf": "USTH.PA", "yf_fallbacks": [], "category": "Core", "theme": "Tech", "region": "USA", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
     "ISEUMD.PA": {"nom": "Europe Mid Cap", "name": "iShares MSCI Europe Mid Cap Acc", "yf": "ISEUMD.PA", "yf_fallbacks": [], "category": "Core", "theme": "Mid Cap", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
     "ALAT.PA": {"nom": "EM Latin America", "name": "Amundi MSCI EM Latin America UCITS", "yf": "ALAT.PA", "yf_fallbacks": [], "category": "Emerging", "theme": "Commodities", "region": "LatAm", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
@@ -337,7 +338,7 @@ class DataManager:
         return None
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 4 : ANALYTICS ENGINE (version institutionnelle corrigée)
+# MODULE 4 : ANALYTICS ENGINE (version institutionnelle avec corrélation)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class AnalyticsEngine:
@@ -605,7 +606,34 @@ class AnalyticsEngine:
         return ((close.iloc[-1] / sma) - 1.0) * 100.0
 
     # -------------------------------------------------------------------------
-    # 10. Méthode unifiée retournant toutes les métriques
+    # 10. Corrélation de Pearson sur rendements logarithmiques (vs benchmark)
+    # -------------------------------------------------------------------------
+    def compute_correlation(self, ticker: str, window: int = 126) -> float:
+        """
+        Corrélation de Pearson entre l'actif et le benchmark (MWRD.PA)
+        calculée sur les rendements logarithmiques journaliers.
+        Retourne une valeur entre -1 et +1 (non annualisée).
+        """
+        asset, bench = self._align_with_benchmark(ticker)
+        if asset.empty or bench.empty or len(asset) < window + 1 or len(bench) < window + 1:
+            return np.nan
+
+        # Rendements logarithmiques journaliers
+        asset_returns = np.log(asset / asset.shift(1))
+        bench_returns = np.log(bench / bench.shift(1))
+
+        # Alignement strict et suppression des dates non communes
+        returns_df = pd.concat([asset_returns, bench_returns], axis=1, join="inner").dropna()
+
+        if len(returns_df) < window:
+            return np.nan
+
+        returns_df = returns_df.iloc[-window:]
+        correlation = returns_df.iloc[:, 0].corr(returns_df.iloc[:, 1])
+        return float(correlation) if pd.notna(correlation) else np.nan
+
+    # -------------------------------------------------------------------------
+    # 11. Méthode unifiée retournant toutes les métriques
     # -------------------------------------------------------------------------
     def compute_all_metrics(self, ticker: str) -> dict:
         """Retourne un dictionnaire avec toutes les métriques (compatible avec SignalEngine)."""
@@ -629,6 +657,11 @@ class AnalyticsEngine:
             "rsi": self.compute_rsi(ticker),
             "dist_sma20": self.compute_distance_sma(ticker, 20),
             "dist_sma50": self.compute_distance_sma(ticker, 50),
+            # Nouvelles corrélations
+            "corr_1m": self.compute_correlation(ticker, self.WINDOW_1M),
+            "corr_3m": self.compute_correlation(ticker, self.WINDOW_3M),
+            "corr_6m": self.compute_correlation(ticker, self.WINDOW_6M),
+            "corr_1y": self.compute_correlation(ticker, self.WINDOW_1Y),
         }
         return metrics
 
@@ -2674,7 +2707,7 @@ class StreamlitUI:
                 st.success("✅ portfolio_positions.json mis à jour depuis les transactions !")
                 st.rerun()
 
-    # ── ONGLET SCREENER ──────────────────────────────────────────────────────
+    # ── ONGLET SCREENER (avec nouvelles colonnes de corrélation) ─────────────
     def render_screener_tab(self):
         st.markdown("## 🔍 Screener Quantitatif d'ETFs")
         st.caption("Scoring multi-facteurs (0-100) basé sur momentum 6M, force relative, Sharpe, volatilité, drawdown, RSI, tendance.")
@@ -2696,7 +2729,12 @@ class StreamlitUI:
                     "Force Relative": f"{res['metrics'].get('rel_strength',0):.1f}%",
                     "Volatilité": f"{res['metrics'].get('volatility',0):.1f}%",
                     "Sharpe": f"{res['metrics'].get('sharpe',0):.2f}",
-                    "Drawdown": f"{res['metrics'].get('max_drawdown_1y',0):.1f}%"
+                    "Drawdown": f"{res['metrics'].get('max_drawdown_1y',0):.1f}%",
+                    # Nouvelles colonnes de corrélation
+                    "Corr 1M": f"{res['metrics'].get('corr_1m',0):.2f}" if res['metrics'].get('corr_1m') is not None else "N/A",
+                    "Corr 3M": f"{res['metrics'].get('corr_3m',0):.2f}" if res['metrics'].get('corr_3m') is not None else "N/A",
+                    "Corr 6M": f"{res['metrics'].get('corr_6m',0):.2f}" if res['metrics'].get('corr_6m') is not None else "N/A",
+                    "Corr 1Y": f"{res['metrics'].get('corr_1y',0):.2f}" if res['metrics'].get('corr_1y') is not None else "N/A",
                 })
             df_scores = pd.DataFrame(scores).sort_values("Score", ascending=False)
         top_n = st.slider("Nombre d'ETFs à afficher", min_value=5, max_value=len(df_scores), value=15, step=5)
