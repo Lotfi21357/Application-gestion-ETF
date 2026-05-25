@@ -1,4 +1,3 @@
-#
 # =============================================================================
 # COCKPIT DÉCISIONNEL BOURSIER v5.6 --- "SCREENER & QUANT ALLOCATION"
 # Lead Dev: Claude (Anthropic)
@@ -185,8 +184,8 @@ BENCHMARK_NOM = "MSCI World AV"
 DATE_DEBUT = datetime(2025, 9, 17)
 
 _DEFAULT_CAPITAL_REEL = 13_796.71
-_DEFAULT_AJUSTEMENT_PAT = 219.97
-_DEFAULT_BONUS_FORTUNEO = 160.0
+_DEFAULT_AJUSTEMENT_PAT = 0.0          # ← MODIFIÉ (valeur par défaut 0)
+_DEFAULT_BONUS_FORTUNEO = 0.0          # ← MODIFIÉ (valeur par défaut 0)
 _CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config_perso.json")
 _DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local.db")
 _PORTFOLIO_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "portfolio_positions.json")
@@ -897,7 +896,7 @@ class PersistenceManager:
         return self._github_warning
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 7 : PORTFOLIO CONFIG MANAGER & TRANSACTION ENGINE (inchangés v5.5)
+# MODULE 7 : PORTFOLIO CONFIG MANAGER & TRANSACTION ENGINE (modifié avec positions initiales 22/05/2026)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class PortfolioConfigManager:
@@ -913,13 +912,12 @@ class PortfolioConfigManager:
                     return data
         except Exception:
             pass
-        # Fallback positions initiales
+        # Positions initiales au 22 mai 2026 (exactes)
         return [
-            {"ticker": "MWRD.PA", "parts": 36.33, "prm": 140.41, "account": "AV"},
-            {"ticker": "DCAM.PA", "parts": 481.0, "prm": 5.5937, "account": "PEA"},
-            {"ticker": "ANRJ.PA", "parts": 4.7701, "prm": 707.55, "account": "AV"},
-            {"ticker": "AASI.PA", "parts": 40.8272, "prm": 49.96, "account": "AV"},
-            {"ticker": "XGDE.PA", "parts": 4.5902, "prm": 163.39, "account": "AV"},
+            {"ticker": "MWRD.PA", "parts": 50.58145, "prm": 140.21, "account": "AV"},
+            {"ticker": "AASI.PA", "parts": 53.75484, "prm": 52.10, "account": "AV"},
+            {"ticker": "XU61.DE", "parts": 14.58606, "prm": 94.12, "account": "AV"},
+            {"ticker": "DCAM.PA", "parts": 508.49831, "prm": 5.965, "account": "PEA"},
         ]
 
     def save_positions(self, positions: List[Dict]) -> bool:
@@ -2014,7 +2012,7 @@ class StreamlitUI:
     def _sign(v: float) -> str:
         return "+" if v >= 0 else ""
 
-    # ── SIDEBAR (avec suppression d'ETF) ─────────────────────────────────────
+    # ── SIDEBAR (avec sauvegarde automatique) ────────────────────────────────
     def render_sidebar(self) -> Tuple[bool, List[Dict], float, float, float]:
         st.sidebar.markdown("## ⚙️ Paramètres v5.6")
         mode_direct = st.sidebar.toggle("🔌 Mode Direct (Vue Brute)", value=False)
@@ -2034,19 +2032,29 @@ class StreamlitUI:
             st.sidebar.markdown(f'<div class="{cls}">{fb}</div>', unsafe_allow_html=True)
         st.sidebar.markdown("---")
 
+        # Configuration des positions avec sauvegarde automatique
         with st.sidebar.expander("⚙️ Configuration des Positions (ETF_LIBRARY)", expanded=False):
-            st.caption("Modifiez vos positions. Sauvegarde dans portfolio_positions.json.")
+            st.caption("Modifiez vos positions. Sauvegarde automatique à chaque modification.")
             raw_pos = st.session_state["raw_positions"]
             new_raw = []
-            for pos in raw_pos:
+            for idx, pos in enumerate(raw_pos):
                 tk_id = pos.get("ticker", "")
                 meta = ETF_LIBRARY.get(tk_id, {})
                 label = meta.get("nom", tk_id)
                 st.markdown(f"**ETF : {label}** `{tk_id}`")
                 c1, c2 = st.columns(2)
-                n_parts = c1.number_input("Parts", value=float(pos.get("parts", 0)), key=f"dca_parts_{tk_id}", format="%.4f", step=0.0001)
-                n_prm = c2.number_input("PRM (€)", value=float(pos.get("prm", 0)), key=f"dca_prm_{tk_id}", format="%.4f", step=0.01)
+                parts_key = f"auto_parts_{idx}_{tk_id}"
+                prm_key = f"auto_prm_{idx}_{tk_id}"
+                n_parts = c1.number_input("Parts", value=float(pos.get("parts", 0)), key=parts_key, format="%.4f", step=0.0001)
+                n_prm = c2.number_input("PRM (€)", value=float(pos.get("prm", 0)), key=prm_key, format="%.4f", step=0.01)
                 new_raw.append({**pos, "parts": n_parts, "prm": n_prm})
+            # Sauvegarde automatique si modification détectée
+            if new_raw != raw_pos:
+                st.session_state["raw_positions"] = new_raw
+                st.session_state["positions"] = enrich_positions(new_raw)
+                self.pcm.save_positions(new_raw)
+                st.rerun()  # pour rafraîchir l'état
+
             st.markdown("---")
             st.caption("Ajouter un ETF de la bibliothèque :")
             existing_tk = [p["ticker"] for p in raw_pos]
@@ -2057,24 +2065,13 @@ class StreamlitUI:
                     meta = ETF_LIBRARY[chosen]
                     new_raw.append({"ticker": chosen, "parts": 0.0, "prm": 0.0, "account": meta.get("enveloppe", "AV")})
                     st.session_state["raw_positions"] = new_raw
-                    pcm = PortfolioConfigManager()
-                    pcm.save_positions(new_raw)
+                    self.pcm.save_positions(new_raw)
                     st.rerun()
-            if st.button("💾 Enregistrer les modifications", use_container_width=True):
-                st.session_state["raw_positions"] = new_raw
-                st.session_state["positions"] = enrich_positions(new_raw)
-                pcm = PortfolioConfigManager()
-                if pcm.save_positions(new_raw):
-                    st.success("✅ portfolio_positions.json synchronisé !")
-                else:
-                    st.error("❌ Erreur d'écriture JSON")
-                st.rerun()
 
         st.sidebar.markdown("---")
         # Bloc suppression d'ETF
         st.sidebar.markdown("### 🗑️ Supprimer un ETF")
-        config_manager = PortfolioConfigManager()
-        current_positions = config_manager.load_positions()
+        current_positions = self.pcm.load_positions()
         if current_positions:
             ticker_to_delete = st.sidebar.selectbox(
                 "Choisir l'ETF à retirer",
@@ -2085,7 +2082,7 @@ class StreamlitUI:
             st.sidebar.warning(f"Action irréversible : cela supprimera {ticker_to_delete} de tous les modules.")
             if st.sidebar.button("❌ Supprimer définitivement", use_container_width=True, type="primary"):
                 updated_positions = [pos for pos in current_positions if pos["ticker"] != ticker_to_delete]
-                if config_manager.save_positions(updated_positions):
+                if self.pcm.save_positions(updated_positions):
                     st.session_state["raw_positions"] = updated_positions
                     st.session_state["positions"] = enrich_positions(updated_positions)
                     st.sidebar.success(f"🎯 {ticker_to_delete} supprimé avec succès !")
