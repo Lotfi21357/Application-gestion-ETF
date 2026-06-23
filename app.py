@@ -10,6 +10,7 @@
 #   • Tableaux de suivi simplifiés (World + Asia uniquement)
 #   • Logique d'arbitrage adaptée aux 2 ETF
 #   • Persistance JSON inchangée, gestion robuste des NaN/None
+#   • Correction : determine_phase ne prend que deux arguments
 #
 # Requis (requirements.txt) :
 #   streamlit yfinance pandas numpy plotly PyGithub scipy ta requests_cache sqlalchemy tzdata
@@ -1488,11 +1489,16 @@ class PortfolioEngine:
         return alerts
 
     def determine_phase(self, gap, em_asia) -> Tuple[str, str]:
-        if gap is None: return "⏳ Phase indéterminée --- Données insuffisantes", "#374151"
-        if gap < 0: return "📉 Phase 1 : Reconquête --- Revenir à l'équilibre vs World AV", "#7F1D1D"
+        """Détermine la phase de marché en fonction du gap et des signaux EM Asia"""
+        if gap is None:
+            return "⏳ Phase indéterminée --- Données insuffisantes", "#374151"
+        if gap < 0:
+            return "📉 Phase 1 : Reconquête --- Revenir à l'équilibre vs World AV", "#7F1D1D"
         signals = []
-        if em_asia and em_asia["sma20"] and em_asia["prix"] < em_asia["sma20"]: signals.append("EM Asia<SMA20")
-        if signals: return f"🔄 Phase 3 : Rotation --- Sécuriser les gains ({', '.join(signals)})", "#78350F"
+        if em_asia and em_asia.get("sma20") and em_asia.get("prix") and em_asia["prix"] < em_asia["sma20"]:
+            signals.append("EM Asia<SMA20")
+        if signals:
+            return f"🔄 Phase 3 : Rotation --- Sécuriser les gains ({', '.join(signals)})", "#78350F"
         return "🚀 Phase 2 : Alpha --- Battre le MSCI World", "#14532D"
 
     # Méthodes pour projection objectifs
@@ -2942,7 +2948,7 @@ def main():
         unified_em = pe.compute_unified_score("AASI.PA")
         target_em = pe.compute_target_weight("EM Asia", "AASI.PA", ptf["valeur_totale"], ptf["positions"])
         ld_alerts = pe.check_leadership_alerts()
-        phase_text, phase_color = pe.determine_phase(bench.get("gap"), em_info, None)
+        phase_text, phase_color = pe.determine_phase(bench.get("gap"), em_info)
         _, _, sent_rows = pe.evaluate_sentinelles()
         live_ok = sum(1 for v in dm.live.values() if v.get("prix"))
         live_total = len(dm.live)
