@@ -1,16 +1,13 @@
 # =============================================================================
-# COCKPIT DÉCISIONNEL BOURSIER v5.8 --- "ALLOCATION LONG TERME V2"
+# COCKPIT DÉCISIONNEL BOURSIER v5.9 --- "ALLOCATION MULTI-ETF"
 # Lead Dev: Claude (Anthropic)
 # =============================================================================
-# v5.8 Évolutions majeures :
-#   • Suppression totale de l'ETF XU61.DE (Infrastructure) vendu
-#   • Portefeuille simplifié : 80% World (MWRD.PA), 20% EM Asia (AASI.PA)
-#   • Mise à jour des positions initiales après vente et achat World
-#   • Suppression des analyses liées à l'Infrastructure
-#   • Tableaux de suivi simplifiés (World + Asia uniquement)
-#   • Logique d'arbitrage adaptée aux 2 ETF
-#   • Persistance JSON inchangée, gestion robuste des NaN/None
-#   • Correction : determine_phase ne prend que deux arguments
+# v5.9 Évolutions majeures :
+#   • Mise à jour du portefeuille : WMMS, DCAM, MWRD, KRW, CHIP
+#   • Suppression de AASI.PA (EM Asia)
+#   • Ajout de nouveaux ETF à la bibliothèque (CHIP, KRW, WMMS, LYXTNOW, IJPE, CV9, LYXFINW)
+#   • Positions initiales alignées sur les données fournies
+#   • Capital investi = 15 023,05 €
 #
 # Requis (requirements.txt) :
 #   streamlit yfinance pandas numpy plotly PyGithub scipy ta requests_cache sqlalchemy tzdata
@@ -43,14 +40,14 @@ except ImportError:
     PYGITHUB_OK = False
 
 st.set_page_config(
-    page_title="Cockpit v5.8 · Allocation Long Terme",
+    page_title="Cockpit v5.9 · Allocation Multi-ETF",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 1 : CSS (inchangé, mobile-first)
+# MODULE 1 : CSS (inchangé)
 # ─────────────────────────────────────────────────────────────────────────────
 
 st.markdown("""
@@ -91,15 +88,22 @@ section[data-testid="stSidebar"] { background-color: #22252E; border-right: 1px 
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 2 : CONSTANTES & CONFIGURATION (Simplifié : World + Asia uniquement)
+# MODULE 2 : CONSTANTES & CONFIGURATION (MIS À JOUR)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ETF_LIBRARY simplifié (World + Asia uniquement)
 ETF_LIBRARY: Dict[str, Dict] = {
-    "MWRD.PA": {"nom": "MSCI World AV", "name": "Amundi MSCI World UCITS DR USD", "yf": "MWRD.PA", "yf_fallbacks": ["IWDA.AS", "EUNL.DE"], "category": "Core", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.80},
-    "AASI.PA": {"nom": "EM Asia", "name": "Amundi MSCI EM Asia", "yf": "AASI.PA", "yf_fallbacks": [], "category": "Satellite", "theme": "Emerging", "region": "Asia", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.20},
-    "DCAM.PA": {"nom": "MSCI World PEA", "name": "Amundi MSCI World UCITS PEA", "yf": "DCAM.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "PEA", "initial_target": None},
-    # Catalogue élargi d'opportunités (conservé pour le screener mais non utilisés)
+    # Portefeuille actuel
+    "WMMS.XETRA": {"nom": "Amundi MSCI World IMI Value Screened", "name": "Amundi MSCI World IMI Value Screened Factor", "yf": "WMMS.DE", "yf_fallbacks": ["WMMS.XETRA"], "category": "Core", "theme": "Value", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.37},
+    "DCAM.PA": {"nom": "MSCI World PEA", "name": "Amundi MSCI World UCITS PEA", "yf": "DCAM.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "PEA", "initial_target": 0.183},
+    "MWRD.PA": {"nom": "MSCI World AV", "name": "Amundi MSCI World UCITS DR USD", "yf": "MWRD.PA", "yf_fallbacks": ["IWDA.AS", "EUNL.DE"], "category": "Core", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.154},
+    "KRW.PA": {"nom": "MSCI Korea", "name": "Amundi MSCI Korea UCITS", "yf": "KRW.PA", "yf_fallbacks": [], "category": "Satellite", "theme": "Korea", "region": "Asia", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.155},
+    "CHIP.PA": {"nom": "MSCI Semiconductors", "name": "Amundi MSCI Semiconductors UCITS", "yf": "CHIP.PA", "yf_fallbacks": [], "category": "Satellite", "theme": "Tech", "region": "Global", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.138},
+    # Nouveaux ETF à analyser (non détenus)
+    "LYXTNOW.PA": {"nom": "World Info Tech", "name": "Amundi MSCI World Information Technology", "yf": "LYXTNOW.PA", "yf_fallbacks": [], "category": "Sector", "theme": "Tech", "region": "Global", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "IJPE.PA": {"nom": "Japan Small Cap", "name": "iShares MSCI Japan Small Cap Acc", "yf": "IJPE.PA", "yf_fallbacks": [], "category": "Core", "theme": "Small Cap", "region": "Japan", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "CV9.PA": {"nom": "Europe Value", "name": "Amundi MSCI Europe Value Factor", "yf": "CV9.PA", "yf_fallbacks": [], "category": "Factor", "theme": "Value", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "LYXFINW.PA": {"nom": "World Financials", "name": "Amundi MSCI World Financials UCITS", "yf": "LYXFINW.PA", "yf_fallbacks": [], "category": "Sector", "theme": "Finance", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    # Catalogue élargi (conservé)
     "500.PA": {"nom": "Amundi S&P 500", "name": "Amundi S&P 500 UCITS", "yf": "500.PA", "yf_fallbacks": [], "category": "Core", "theme": "Large Cap", "region": "USA", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
     "USTE.PA": {"nom": "Nasdaq-100", "name": "Lyxor UCITS Nasdaq-100 D-EUR", "yf": "USTE.PA", "yf_fallbacks": [], "category": "Core", "theme": "Tech", "region": "USA", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
     "CW8.PA": {"nom": "MSCI World CW8", "name": "Amundi MSCI World UCITS", "yf": "CW8.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
@@ -111,7 +115,6 @@ ETF_LIBRARY: Dict[str, Dict] = {
     "ALAT.PA": {"nom": "EM Latin America", "name": "Amundi MSCI EM Latin America UCITS", "yf": "ALAT.PA", "yf_fallbacks": [], "category": "Emerging", "theme": "Commodities", "region": "LatAm", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
     "INDG.PA": {"nom": "Europe Industrials", "name": "Amundi STOXX Europe 600 Industrials", "yf": "INDG.PA", "yf_fallbacks": [], "category": "Sector", "theme": "Industrial", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
     "DJE.PA": {"nom": "Dow Jones", "name": "Amundi Dow Jones Industrial Average", "yf": "DJE.PA", "yf_fallbacks": [], "category": "Core", "theme": "Value", "region": "USA", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "LYXFINW.PA": {"nom": "World Financials", "name": "Amundi MSCI World Financials UCITS", "yf": "LYXFINW.PA", "yf_fallbacks": [], "category": "Sector", "theme": "Finance", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
     "NRAM.PA": {"nom": "North America ESG", "name": "AMUNDI MSCI North America ESG", "yf": "NRAM.PA", "yf_fallbacks": [], "category": "ESG", "theme": "Sustainability", "region": "NorthAmerica", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
     "GOAI.PA": {"nom": "Global AI", "name": "Amundi Stoxx Global Artificial Intelligence", "yf": "GOAI.PA", "yf_fallbacks": [], "category": "Satellite", "theme": "AI & Tech", "region": "Global", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
     "ENRGA.PA": {"nom": "Europe Energy", "name": "Amundi STOXX Europe 600 Energy", "yf": "ENRGA.PA", "yf_fallbacks": [], "category": "Sector", "theme": "Energy", "region": "Europe", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
@@ -120,7 +123,6 @@ ETF_LIBRARY: Dict[str, Dict] = {
     "CD9.PA": {"nom": "Europe High Dividend", "name": "Amundi MSCI Europe High Dividend", "yf": "CD9.PA", "yf_fallbacks": [], "category": "Factor", "theme": "Dividend", "region": "Europe", "risk_type": "Defensive", "enveloppe": "AV", "initial_target": 0.0},
     "CJ1.PA": {"nom": "Japan MSCI", "name": "Amundi ETF MSCI Japan UCITS", "yf": "CJ1.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Japan", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
     "USRI.PA": {"nom": "USA SRI", "name": "AMUNDI MSCI USA SRI Climate Net", "yf": "USRI.PA", "yf_fallbacks": [], "category": "ESG", "theme": "Sustainability", "region": "USA", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "LYXTNOW.PA": {"nom": "World Info Tech", "name": "Amundi MSCI World Information", "yf": "LYXTNOW.PA", "yf_fallbacks": [], "category": "Sector", "theme": "Tech", "region": "Global", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
     "EBUY.PA": {"nom": "Digital Economy", "name": "Lyxor MSCI Digital", "yf": "EBUY.PA", "yf_fallbacks": [], "category": "Satellite", "theme": "Digital Economy", "region": "Global", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
     "COMO.PA": {"nom": "Commodities", "name": "Lyxor UCITS Commodities Thomson", "yf": "COMO.PA", "yf_fallbacks": [], "category": "Alternative", "theme": "Commodities", "region": "Global", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
     "CP9.PA": {"nom": "Pacific Ex Japan", "name": "Amundi ETF MSCI Pacific Ex Japan", "yf": "CP9.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Pacific", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
@@ -151,24 +153,24 @@ ETF_LIBRARY: Dict[str, Dict] = {
     "AUEM.PA": {"nom": "MSCI EM USD", "name": "Amundi ETF MSCI Emerging Markets USD", "yf": "AUEM.PA", "yf_fallbacks": [], "category": "Emerging", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
 }
 
-# Suppression des références à XU61.DE
-GOLD_TICKERS_FALLBACK = []  # plus d'or
-WORLD_TICKERS = ["MWRD.PA", "IWDA.AS", "EUNL.DE", "DCAM.PA"]
-PROXIES_EM_ASIA = ["TSM", "005930.KS", "000660.KS", "TCEHY"]  # TSMC, Samsung, SK Hynix, Tencent
+# Suppression de AASI.PA, plus de Gold
+GOLD_TICKERS_FALLBACK = []
+WORLD_TICKERS = ["WMMS.XETRA", "WMMS.DE", "MWRD.PA", "IWDA.AS", "EUNL.DE", "DCAM.PA"]
+PROXIES_KR = ["005930.KS", "000660.KS"]  # Samsung, SK Hynix
+PROXIES_CHIP = ["TSM", "NVDA", "AMD", "INTC"]  # semiconducteurs
 MACRO_TICKERS = {"NQ=F": "Nasdaq 100", "ES=F": "S&P 500", "^TNX": "US 10Y (%)", "EURUSD=X": "EUR/USD", "BZ=F": "Brent ($)", "GC=F": "Or ($)", "DX-Y.NYB": "Dollar Index", "MCHI": "iShares MSCI China"}
 REGIME_TICKERS = ["SPY", "QQQ", "^VIX", "^TNX", "DX-Y.NYB", "ES=F", "NQ=F"]
-SENTINELLES = {"TSMC": ["TSM"], "Samsung": ["005930.KS"], "SK Hynix": ["000660.KS"], "Tencent": ["TCEHY"]}
+SENTINELLES = {"Samsung": ["005930.KS"], "SK Hynix": ["000660.KS"], "TSMC": ["TSM"], "NVIDIA": ["NVDA"], "AMD": ["AMD"], "Intel": ["INTC"]}
 BENCHMARK_NOM = "MSCI World AV"
 DATE_DEBUT = datetime(2025, 9, 17)
 
-_DEFAULT_CAPITAL_REEL = 13_796.71
+_DEFAULT_CAPITAL_REEL = 15023.05  # Capital investi
 _DEFAULT_AJUSTEMENT_PAT = 0.0
 _DEFAULT_BONUS_FORTUNEO = 0.0
 _CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config_perso.json")
 _DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local.db")
 _PORTFOLIO_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "portfolio_positions.json")
 _TRANSACTIONS_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transactions.json")
-
 # ─────────────────────────────────────────────────────────────────────────────
 # MODULE 3 : FONCTIONS CACHÉES ET DATA MANAGER OPTIMISÉ
 # ─────────────────────────────────────────────────────────────────────────────
@@ -218,7 +220,7 @@ def _fetch_live_price(tk: str) -> Tuple[Optional[float], Optional[float]]:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _cached_live_prices() -> Dict[str, Dict]:
-    all_tickers = list(ETF_LIBRARY.keys()) + list(MACRO_TICKERS.keys()) + REGIME_TICKERS + PROXIES_EM_ASIA
+    all_tickers = list(ETF_LIBRARY.keys()) + list(MACRO_TICKERS.keys()) + REGIME_TICKERS + PROXIES_KR + PROXIES_CHIP
     for tlist in SENTINELLES.values():
         all_tickers.extend(tlist)
     all_tickers = list(dict.fromkeys(all_tickers))
@@ -230,7 +232,7 @@ def _cached_live_prices() -> Dict[str, Dict]:
 
 @st.cache_data(ttl=7200, show_spinner=False)
 def _cached_historical_data() -> Dict[str, pd.DataFrame]:
-    all_tickers = list(ETF_LIBRARY.keys()) + list(MACRO_TICKERS.keys()) + REGIME_TICKERS + PROXIES_EM_ASIA
+    all_tickers = list(ETF_LIBRARY.keys()) + list(MACRO_TICKERS.keys()) + REGIME_TICKERS + PROXIES_KR + PROXIES_CHIP
     for tlist in SENTINELLES.values():
         all_tickers.extend(tlist)
     all_tickers = list(dict.fromkeys(all_tickers))
@@ -329,7 +331,7 @@ class AnalyticsEngine:
     - 756 jours ouvrés → 3 ans
 
     Utilise 'Adj Close' en priorité, sinon 'Close'.
-    Benchmark pour la force relative et l'information ratio : MWRD.PA (MSCI World AV).
+    Benchmark pour la force relative et l'information ratio : MWRD.PA (MSCI World AV) ou WMMS selon dispo.
     Taux sans risque par défaut : 2.5% annualisé (0.025).
     """
 
@@ -345,7 +347,7 @@ class AnalyticsEngine:
 
     def __init__(self, dm: DataManager):
         self.dm = dm
-        # Récupération du benchmark principal (MWRD.PA)
+        # Récupération du benchmark principal (MWRD.PA en priorité, sinon WMMS)
         self.benchmark_ticker = "MWRD.PA"
         self.benchmark_df = dm.data.get(self.benchmark_ticker)
         if self.benchmark_df is None or self.benchmark_df.empty:
@@ -870,7 +872,6 @@ class PersistenceManager:
     @property
     def warning_msg(self) -> str:
         return self._github_warning
-
 # ─────────────────────────────────────────────────────────────────────────────
 # MODULE 7 : PORTFOLIO CONFIG MANAGER & TRANSACTION ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
@@ -888,12 +889,18 @@ class PortfolioConfigManager:
                     return data
         except Exception:
             pass
-        # Positions mises à jour le 23 juin 2026
-        # MWRD.PA: 50.58145 (initial) + 9.4217 (achat du 22 juin) = 60.00315
+        # Positions initiales au 6 septembre 2026 (parts = 1 pour simplifier, PRM calculé)
+        # WMMS : 37.0% de 17214.31 = 6369.29 €, perf 10.45% → PRM = valeur / (1+0.1045) ≈ 5765.5
+        # DCAM : 18.3% = 3140.96 €, perf 24.08% → PRM ≈ 2530.0
+        # MWRD : 15.4% = 2660.82 €, perf 6.91% → PRM ≈ 2488.8
+        # KRW  : 15.5% = 2660.70 €, perf 25.85% → PRM ≈ 2114.5
+        # CHIP : 13.8% = 2375.54 €, perf 11.47% → PRM ≈ 2130.5
         return [
-            {"ticker": "MWRD.PA", "parts": 60.00315, "prm": 140.21, "account": "AV"},
-            {"ticker": "AASI.PA", "parts": 53.75484, "prm": 52.10, "account": "AV"},
-            {"ticker": "DCAM.PA", "parts": 508.49831, "prm": 5.965, "account": "PEA"},
+            {"ticker": "WMMS.XETRA", "parts": 1.0, "prm": 5765.5, "account": "AV"},
+            {"ticker": "DCAM.PA", "parts": 1.0, "prm": 2530.0, "account": "PEA"},
+            {"ticker": "MWRD.PA", "parts": 1.0, "prm": 2488.8, "account": "AV"},
+            {"ticker": "KRW.PA", "parts": 1.0, "prm": 2114.5, "account": "AV"},
+            {"ticker": "CHIP.PA", "parts": 1.0, "prm": 2130.5, "account": "AV"},
         ]
 
     def save_positions(self, positions: List[Dict]) -> bool:
@@ -1232,9 +1239,8 @@ class QuantRiskEngine:
         w = np.array(valid_w) / sum(valid_w)
         cov = df_all.cov().values * 252
         return float(np.sqrt(w @ cov @ w))
-
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 10 : PORTFOLIO ENGINE (adapté pour World + EM Asia)
+# MODULE 10 : PORTFOLIO ENGINE (adapté pour le nouveau portefeuille)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def enrich_positions(raw_positions: List[Dict]) -> List[Dict]:
@@ -1269,7 +1275,7 @@ class PortfolioEngine:
             ("2026-04-01", 750.0),
         ]
         df_h = None
-        for tk in ["MWRD.PA", "IWDA.AS", "EUNL.DE"]:
+        for tk in ["MWRD.PA", "IWDA.AS", "EUNL.DE", "WMMS.DE"]:
             df_h = self.dm.data.get(tk)
             if df_h is not None and not df_h.empty and "Close" in df_h.columns:
                 break
@@ -1304,7 +1310,11 @@ class PortfolioEngine:
             prix, prev, tk_used = self.dm.get_price_info(pos["tickers"])
             env = pos["enveloppe"]
             if prix is None:
-                positions_calc.append({"nom": pos["nom"], "ticker": None, "prix": None, "valeur": 0.0, "perf_pct": None, "var_jour_pct": 0.0, "var_jour_eur": 0.0, "enveloppe": env})
+                positions_calc.append({
+                    "nom": pos["nom"], "ticker": None, "prix": None, "valeur": 0.0,
+                    "perf_pct": None, "var_jour_pct": 0.0, "var_jour_eur": 0.0,
+                    "enveloppe": env, "parts": pos["parts"], "prm": pos["prm"], "gain_unit": 0
+                })
                 continue
             valeur = pos["parts"] * prix
             gain_unit = prix - pos["prm"]
@@ -1312,8 +1322,11 @@ class PortfolioEngine:
             gain_total = gain_unit * pos["parts"]
             var_j_pct = (prix - prev) / prev * 100 if prev and prev != 0 else 0.0
             var_j_eur = (prix - prev) * pos["parts"] if prev else 0.0
-            positions_calc.append({"nom": pos["nom"], "ticker": tk_used, "prix": prix, "valeur": valeur, "perf_pct": perf_pct,
-                                   "var_jour_pct": var_j_pct, "var_jour_eur": var_j_eur, "enveloppe": env})
+            positions_calc.append({
+                "nom": pos["nom"], "ticker": tk_used, "prix": prix, "valeur": valeur,
+                "perf_pct": perf_pct, "var_jour_pct": var_j_pct, "var_jour_eur": var_j_eur,
+                "enveloppe": env, "parts": pos["parts"], "prm": pos["prm"], "gain_unit": gain_unit
+            })
             valeur_totale += valeur
             val_env[env] += valeur
             gan_env[env] += gain_total
@@ -1323,10 +1336,12 @@ class PortfolioEngine:
         perf_tot_pct = (gain_reel / capital_reel * 100) if capital_reel else 0.0
         perf_j_eur = valeur_totale - valeur_veille
         perf_j_pct = perf_j_eur / valeur_veille * 100 if valeur_veille else 0.0
-        return {"positions": positions_calc, "valeur_totale": valeur_totale, "solde_total": solde_total,
-                "gain_reel": gain_reel, "perf_tot_pct": perf_tot_pct, "valeur_veille": valeur_veille,
-                "val_env": val_env, "gain_env": gan_env, "ajustement_pat": ajustement_pat,
-                "capital_reel": capital_reel, "perf_j_eur": perf_j_eur, "perf_j_pct": perf_j_pct}
+        return {
+            "positions": positions_calc, "valeur_totale": valeur_totale, "solde_total": solde_total,
+            "gain_reel": gain_reel, "perf_tot_pct": perf_tot_pct, "valeur_veille": valeur_veille,
+            "val_env": val_env, "gain_env": gan_env, "ajustement_pat": ajustement_pat,
+            "capital_reel": capital_reel, "perf_j_eur": perf_j_eur, "perf_j_pct": perf_j_pct
+        }
 
     def compute_benchmark(self, positions_conf: List[Dict], perf_tot_pct: float) -> Dict:
         bench = next((p for p in positions_conf if p["nom"] == BENCHMARK_NOM), None)
@@ -1353,8 +1368,10 @@ class PortfolioEngine:
         gap_adj = perf_tot_pct - perf_bench_adj if perf_bench_adj != 0 else None
         gap_lumpsum = perf_tot_pct - perf_bench_lumpsum if perf_bench_lumpsum is not None else None
         perf_bench_j = (prix - prev) / prev * 100 if prev and prev != 0 else None
-        return {"perf_bench": perf_bench_lumpsum, "perf_bench_adj": perf_bench_adj, "gap": gap_adj,
-                "gap_lumpsum": gap_lumpsum, "prix": prix, "perf_bench_j": perf_bench_j}
+        return {
+            "perf_bench": perf_bench_lumpsum, "perf_bench_adj": perf_bench_adj,
+            "gap": gap_adj, "gap_lumpsum": gap_lumpsum, "prix": prix, "perf_bench_j": perf_bench_j
+        }
 
     def compute_unified_score(self, ticker: str) -> Dict:
         info = self.dm.analyze_ticker(ticker)
@@ -1362,26 +1379,39 @@ class PortfolioEngine:
         score = 0
         rsi_v = info["rsi"] if info else None
         if rsi_v is not None:
-            if rsi_v >= 70: ms, mb, md = -1, "bear", f"RSI={rsi_v:.1f} Tendu"
-            elif rsi_v <= 45: ms, mb, md = -1, "bear", f"RSI={rsi_v:.1f} Faible"
-            else: ms, mb, md = 1, "bull", f"RSI={rsi_v:.1f} Sain"
-        else: ms, mb, md = 0, "neut", "RSI indisponible"
-        details.append({"name": "Momentum", "score": ms, "badge": mb, "desc": md}); score += ms
+            if rsi_v >= 70:
+                ms, mb, md = -1, "bear", f"RSI={rsi_v:.1f} Tendu"
+            elif rsi_v <= 45:
+                ms, mb, md = -1, "bear", f"RSI={rsi_v:.1f} Faible"
+            else:
+                ms, mb, md = 1, "bull", f"RSI={rsi_v:.1f} Sain"
+        else:
+            ms, mb, md = 0, "neut", "RSI indisponible"
+        details.append({"name": "Momentum", "score": ms, "badge": mb, "desc": md})
+        score += ms
         if info and info["sma20"] is not None:
             if info["prix"] > info["sma20"]:
                 ss, sb, sd = 1, "bull", f"Prix {info['prix']:.2f} > SMA20 {info['sma20']:.2f}"
             else:
                 ss, sb, sd = -1, "bear", f"Prix {info['prix']:.2f} < SMA20 {info['sma20']:.2f}"
-        else: ss, sb, sd = 0, "neut", "SMA20 indisponible"
-        details.append({"name": "Structure", "score": ss, "badge": sb, "desc": sd}); score += ss
+        else:
+            ss, sb, sd = 0, "neut", "SMA20 indisponible"
+        details.append({"name": "Structure", "score": ss, "badge": sb, "desc": sd})
+        score += ss
         rs_slope = self.dm.relative_strength_slope(ticker, 14)
         if rs_slope is not None:
-            if rs_slope > 0: ls, lb, ld = 2, "bull", f"Pente={rs_slope:+.5f} Leader ✓"
-            else: ls, lb, ld = -2, "bear", f"Pente={rs_slope:.5f} Lagger"
-        else: ls, lb, ld = 0, "neut", "Données insuffisantes"
-        details.append({"name": "Leadership", "score": ls, "badge": lb, "desc": ld}); score += ls
-        return {"total": max(-4, min(4, score)), "momentum": ms, "structure": ss, "leadership": ls,
-                "details": details, "rsi_raw": rsi_v, "adx_raw": info["adx"] if info else None}
+            if rs_slope > 0:
+                ls, lb, ld = 2, "bull", f"Pente={rs_slope:+.5f} Leader ✓"
+            else:
+                ls, lb, ld = -2, "bear", f"Pente={rs_slope:.5f} Lagger"
+        else:
+            ls, lb, ld = 0, "neut", "Données insuffisantes"
+        details.append({"name": "Leadership", "score": ls, "badge": lb, "desc": ld})
+        score += ls
+        return {
+            "total": max(-4, min(4, score)), "momentum": ms, "structure": ss, "leadership": ls,
+            "details": details, "rsi_raw": rsi_v, "adx_raw": info["adx"] if info else None
+        }
 
     def compute_strategic_score_4c(self, ticker: str, regime: Dict) -> Dict:
         info = self.dm.analyze_ticker(ticker)
@@ -1395,8 +1425,10 @@ class PortfolioEngine:
         vol = self.qre.rolling_volatility(ticker, 30)
         vol_raw = max(-1.0, min(1.0, (0.20 - vol) / 0.10)) if vol is not None else 0.0
         total = (trend_raw * 0.25 + macro_raw * 0.30 + leader_raw * 0.25 + vol_raw * 0.20)
-        return {"total": max(-1.0, min(1.0, total)), "trend": trend_raw, "macro": macro_raw,
-                "leadership": leader_raw, "risk_vol": vol_raw}
+        return {
+            "total": max(-1.0, min(1.0, total)), "trend": trend_raw, "macro": macro_raw,
+            "leadership": leader_raw, "risk_vol": vol_raw
+        }
 
     def compute_confidence_factor(self, tickers: List[str], weights: List[float]) -> float:
         port_vol = self.qre.portfolio_volatility(tickers, weights, 60)
@@ -1428,27 +1460,20 @@ class PortfolioEngine:
         if delta_pct > 1.0: action = "RÉDUIRE"
         elif delta_pct < -1.0: action = "RENFORCER"
         else: action = "MAINTENIR"
-        return {"nom": nom, "unified_score": unified["total"], "strat_score": strat4c["total"], "strat4c": strat4c,
-                "base_weight": base_w, "regime_mult": regime_mult, "confidence": confidence,
-                "target_pct": target_pct, "current_pct": current_pct, "current_eur": current_val,
-                "target_eur": target_eur, "delta_pct": delta_pct, "delta_eur": current_val - target_eur,
-                "action": action, "regime_label": regime["confirmed_label"]}
+        return {
+            "nom": nom, "unified_score": unified["total"], "strat_score": strat4c["total"],
+            "strat4c": strat4c, "base_weight": base_w, "regime_mult": regime_mult,
+            "confidence": confidence, "target_pct": target_pct, "current_pct": current_pct,
+            "current_eur": current_val, "target_eur": target_eur, "delta_pct": delta_pct,
+            "delta_eur": current_val - target_eur, "action": action,
+            "regime_label": regime["confirmed_label"]
+        }
 
     def _get_base_weight(self, score: int, initial_target: float) -> float:
         if score >= 3: return initial_target
         elif score >= 1: return 0.20
         elif score >= -1: return 0.15
         else: return 0.05
-
-    def evaluate_em_asia(self, aasi: Optional[Dict]) -> Tuple[str, str]:
-        if aasi is None: return "⚠️ AASI données indisponibles", "gray"
-        p = aasi["prix"]
-        if p > 60.35:
-            if aasi["ath30"] and p < aasi["ath30"] * 0.92: return "🎯 TRAILING STOP --8% ATH déclenché", "red"
-            return "📈 TRAILING STOP ACTIF --- Surveiller", "green"
-        if aasi["sma20"] and p < aasi["sma20"]: return "🔶 SOUS SMA20 --- Surveillance active", "orange"
-        if aasi["sma50"] and p > aasi["sma50"]: return "✅ MAINTIEN --- Au-dessus SMA50", "green"
-        return "ℹ️ SURVEILLANCE NEUTRE", "orange"
 
     def evaluate_sentinelles(self) -> Tuple[str, str, List[Dict]]:
         alerts, rows = [], []
@@ -1458,11 +1483,15 @@ class PortfolioEngine:
                 info = self.dm.analyze_ticker(tk)
                 if info: break
             alerte = ""
-            if info and info["sma20"] and info["prix"] < info["sma20"]:
+            if info and info["sma20"] and info["prix"] and info["prix"] < info["sma20"]:
                 alerte = "⚠️"; alerts.append(name)
-            rows.append({"Sentinelle": name, "Prix": f"{info['prix']:.2f}" if info else "N/A",
-                         "SMA20": f"{info['sma20']:.2f}" if (info and info["sma20"]) else "N/A",
-                         "RSI": f"{info['rsi']:.1f}" if (info and info["rsi"]) else "N/A", "Alerte": alerte})
+            rows.append({
+                "Sentinelle": name,
+                "Prix": f"{info['prix']:.2f}" if info and info['prix'] else "N/A",
+                "SMA20": f"{info['sma20']:.2f}" if (info and info["sma20"]) else "N/A",
+                "RSI": f"{info['rsi']:.1f}" if (info and info["rsi"]) else "N/A",
+                "Alerte": alerte
+            })
         msg = " | ".join([f"⚠️ {a} sous SMA20" for a in alerts]) if alerts else "✅ Sentinelles OK"
         return msg, "orange" if alerts else "green", rows
 
@@ -1488,15 +1517,18 @@ class PortfolioEngine:
             alerts.append({"nom": meta["nom"], "sat_perf": s_pf, "world_perf": w_pf, "gap": s_pf - w_pf})
         return alerts
 
-    def determine_phase(self, gap, em_asia) -> Tuple[str, str]:
-        """Détermine la phase de marché en fonction du gap et des signaux EM Asia"""
+    def determine_phase(self, gap, etf_infos) -> Tuple[str, str]:
+        """Détermine la phase en fonction du gap et des signaux des ETF détenus."""
         if gap is None:
             return "⏳ Phase indéterminée --- Données insuffisantes", "#374151"
         if gap < 0:
             return "📉 Phase 1 : Reconquête --- Revenir à l'équilibre vs World AV", "#7F1D1D"
+        # Vérifier les SMA20 des ETF détenus
         signals = []
-        if em_asia and em_asia.get("sma20") and em_asia.get("prix") and em_asia["prix"] < em_asia["sma20"]:
-            signals.append("EM Asia<SMA20")
+        for ticker, info in etf_infos.items():
+            if info and info.get("sma20") and info.get("prix") and info["prix"] < info["sma20"]:
+                short_name = ETF_LIBRARY.get(ticker, {}).get("nom", ticker)[:8]
+                signals.append(f"{short_name}<SMA20")
         if signals:
             return f"🔄 Phase 3 : Rotation --- Sécuriser les gains ({', '.join(signals)})", "#78350F"
         return "🚀 Phase 2 : Alpha --- Battre le MSCI World", "#14532D"
@@ -1512,6 +1544,7 @@ class PortfolioEngine:
         start_date_str = start_date.strftime("%Y-%m-%d")
         if start_date_str in close.index:
             price_start = close.loc[start_date_str]
+            start_date_effective = start_date
         else:
             idx = close.index[close.index >= start_date_str]
             if len(idx) == 0:
@@ -1524,8 +1557,6 @@ class PortfolioEngine:
         if price_start <= 0 or price_end <= 0:
             return 0.07, True
         end_date = close.index[-1]
-        if 'start_date_effective' not in locals():
-            start_date_effective = start_date
         days = (end_date - start_date_effective).days
         if days <= 0:
             return 0.07, True
@@ -1538,7 +1569,7 @@ class PortfolioEngine:
         return cagr, False
 
     def compute_envelope_cagr(self, envelope: str, positions_calc: List[Dict]) -> Tuple[float, bool]:
-        env_positions = [p for p in positions_calc if p.get("enveloppe") == envelope and p.get("valeur",0) > 0]
+        env_positions = [p for p in positions_calc if p.get("enveloppe") == envelope and p.get("valeur", 0) > 0]
         if not env_positions:
             return 0.07, True
         if envelope == "PEA":
@@ -1583,9 +1614,12 @@ class PedagogicEngine:
             return {"value": "N/A", "emoji": "❓", "level": "orange", "title": f"Agitation de {asset_name}",
                     "explain": "Donnée indisponible.", "scale": [], "action": "Revérifier plus tard."}
         pct = vol * 100
-        if pct < 15: emoji, level, msg, action = "😌", "green", "L'ETF est calme et stable.", "Aucune vigilance."
-        elif pct < 25: emoji, level, msg, action = "😐", "orange", "L'ETF bouge normalement.", "Surveillez."
-        else: emoji, level, msg, action = "😰", "red", "L'ETF est agité, variations brutales possibles.", "Réduisez éventuellement."
+        if pct < 15:
+            emoji, level, msg, action = "😌", "green", "L'ETF est calme et stable.", "Aucune vigilance."
+        elif pct < 25:
+            emoji, level, msg, action = "😐", "orange", "L'ETF bouge normalement.", "Surveillez."
+        else:
+            emoji, level, msg, action = "😰", "red", "L'ETF est agité, variations brutales possibles.", "Réduisez éventuellement."
         return {"value": f"{pct:.1f}%", "emoji": emoji, "level": level, "title": f"Agitation de {asset_name}",
                 "explain": f"{msg}\n\nPlus ce chiffre est élevé, plus l'ETF peut perdre ou gagner brusquement.",
                 "scale": [{"label": "< 15% --- Calme", "cls": "scale-green"},
@@ -1596,11 +1630,16 @@ class PedagogicEngine:
         if beta is None:
             return {"value": "N/A", "emoji": "❓", "level": "orange", "title": "Sensibilité au marché",
                     "explain": "Donnée indisponible.", "scale": [], "action": "Revérifier plus tard."}
-        if beta < 0: emoji, level, msg, action = "🔄", "orange", "ETF à contre-courant du marché.", "Défensif intéressant."
-        elif beta < 0.8: emoji, level, msg, action = "🛡️", "green", f"Bouge {(1-beta)*100:.0f}% moins que le marché.", "Protège bien en baisse."
-        elif beta < 1.2: emoji, level, msg, action = "⚖️", "green", "Suit le marché de façon équilibrée.", "Comportement neutre."
-        elif beta < 1.8: emoji, level, msg, action = "⚡", "orange", f"Bouge {(beta-1)*100:.0f}% plus violemment.", "Limitez la position."
-        else: emoji, level, msg, action = "🌋", "red", "Très sensible aux mouvements du marché.", "Position risquée."
+        if beta < 0:
+            emoji, level, msg, action = "🔄", "orange", "ETF à contre-courant du marché.", "Défensif intéressant."
+        elif beta < 0.8:
+            emoji, level, msg, action = "🛡️", "green", f"Bouge {(1-beta)*100:.0f}% moins que le marché.", "Protège bien en baisse."
+        elif beta < 1.2:
+            emoji, level, msg, action = "⚖️", "green", "Suit le marché de façon équilibrée.", "Comportement neutre."
+        elif beta < 1.8:
+            emoji, level, msg, action = "⚡", "orange", f"Bouge {(beta-1)*100:.0f}% plus violemment.", "Limitez la position."
+        else:
+            emoji, level, msg, action = "🌋", "red", "Très sensible aux mouvements du marché.", "Position risquée."
         return {"value": f"{beta:.2f}×", "emoji": emoji, "level": level, "title": f"Sensibilité au marché de {asset_name}",
                 "explain": msg, "scale": [{"label": "< 0.8 --- Défensif", "cls": "scale-green"},
                                           {"label": "0.8-1.2 --- Neutre", "cls": "scale-green"},
@@ -1612,10 +1651,14 @@ class PedagogicEngine:
             return {"value": "N/A", "emoji": "❓", "level": "orange", "title": "Recul depuis le sommet",
                     "explain": "Donnée indisponible.", "scale": [], "action": "Revérifier plus tard."}
         abs_dd = abs(current_dd)
-        if abs_dd < 3: emoji, level, msg, action = "🏔️", "green", f"{asset_name} est proche de son sommet.", "Aucune alerte."
-        elif abs_dd < 8: emoji, level, msg, action = "📉", "orange", f"Recul de {abs_dd:.1f}%, repli normal.", "Surveillance normale."
-        elif abs_dd < 15: emoji, level, msg, action = "⚠️", "orange", f"Recul de {abs_dd:.1f}%, correction significative.", "Vérifiez le stop-loss."
-        else: emoji, level, msg, action = "🚨", "red", f"Chute de {abs_dd:.1f}%, perte importante.", "Envisagez de réduire."
+        if abs_dd < 3:
+            emoji, level, msg, action = "🏔️", "green", f"{asset_name} est proche de son sommet.", "Aucune alerte."
+        elif abs_dd < 8:
+            emoji, level, msg, action = "📉", "orange", f"Recul de {abs_dd:.1f}%, repli normal.", "Surveillance normale."
+        elif abs_dd < 15:
+            emoji, level, msg, action = "⚠️", "orange", f"Recul de {abs_dd:.1f}%, correction significative.", "Vérifiez le stop-loss."
+        else:
+            emoji, level, msg, action = "🚨", "red", f"Chute de {abs_dd:.1f}%, perte importante.", "Envisagez de réduire."
         max_str = f" | Plus forte baisse 1 an : {abs(max_dd):.1f}%" if max_dd is not None else ""
         return {"value": f"{current_dd:.1f}%", "emoji": emoji, "level": level, "title": f"Recul depuis le sommet de {asset_name}",
                 "explain": msg + max_str, "scale": [{"label": "0 à -3% --- Sommet", "cls": "scale-green"},
@@ -1693,20 +1736,25 @@ class PedagogicEngine:
         return labels, list(sat_ret.values), list(world_ret.values)
 
     def translate_simple_score(self, score_raw: int) -> Dict:
-        mapping = {-4:0,-3:0,-2:1,-1:2,0:2,1:3,2:3,3:4,4:5}
+        mapping = {-4:0, -3:0, -2:1, -1:2, 0:2, 1:3, 2:3, 3:4, 4:5}
         simple = mapping.get(max(-4, min(4, score_raw)), 2)
-        msgs = {5: ("⭐⭐⭐⭐⭐", "Momentum très fort", "ring-5", "Tout est au vert.", "Maintenez."),
-                4: ("⭐⭐⭐⭐☆", "Tendance saine", "ring-4", "Progresse bien.", "Maintenez / renforcez."),
-                3: ("⭐⭐⭐☆☆", "Situation neutre", "ring-3", "Stable.", "Maintenez."),
-                2: ("⭐⭐☆☆☆", "Fragilité", "ring-2", "Signes de faiblesse.", "Prudence."),
-                1: ("⭐☆☆☆☆", "Risque élevé", "ring-1", "Difficultés.", "Envisagez de réduire."),
-                0: ("☆☆☆☆☆", "Danger", "ring-0", "Très dégradé.", "Réduction forte.")}
+        msgs = {
+            5: ("⭐⭐⭐⭐⭐", "Momentum très fort", "ring-5", "Tout est au vert.", "Maintenez."),
+            4: ("⭐⭐⭐⭐☆", "Tendance saine", "ring-4", "Progresse bien.", "Maintenez / renforcez."),
+            3: ("⭐⭐⭐☆☆", "Situation neutre", "ring-3", "Stable.", "Maintenez."),
+            2: ("⭐⭐☆☆☆", "Fragilité", "ring-2", "Signes de faiblesse.", "Prudence."),
+            1: ("⭐☆☆☆☆", "Risque élevé", "ring-1", "Difficultés.", "Envisagez de réduire."),
+            0: ("☆☆☆☆☆", "Danger", "ring-0", "Très dégradé.", "Réduction forte.")
+        }
         stars, label, ring_cls, explain, action = msgs[simple]
         return {"score": simple, "stars": stars, "label": label, "ring_cls": ring_cls, "explain": explain, "action": action}
 
     def translate_sentinelles(self, sent_rows: List[Dict], sector: str) -> Dict:
-        if sector == "em_asia":
-            names = ["TSMC", "Samsung", "SK Hynix", "Tencent"]
+        # Pour les nouveaux ETF, on peut adapter les noms de sentinelles
+        if sector == "korea":
+            names = ["Samsung", "SK Hynix"]
+        elif sector == "chip":
+            names = ["TSMC", "NVIDIA", "AMD", "Intel"]
         else:
             names = []
         alerts = [r for r in sent_rows if r.get("Sentinelle") in names and r.get("Alerte") == "⚠️"]
@@ -1720,14 +1768,15 @@ class PedagogicEngine:
         else:
             return {"emoji": "🔴", "level": "red", "message": "Décrochage fort des leaders.",
                     "detail": f"{', '.join([a['Sentinelle'] for a in alerts])} sous SMA20.", "action": "Réduction conseillée."}
-
 # ─────────────────────────────────────────────────────────────────────────────
 # MODULE 12 : STRATEGIC ENGINE (inchangé)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class StrategicEngine:
     def __init__(self, dm: DataManager, mre: MarketRegimeEngine, qre: QuantRiskEngine):
-        self.dm = dm; self.mre = mre; self.qre = qre
+        self.dm = dm
+        self.mre = mre
+        self.qre = qre
 
     def compute(self, ticker: str, unified_score: Dict, regime: Dict) -> Dict:
         details = []
@@ -1739,6 +1788,7 @@ class StrategicEngine:
         else:
             mom_score, mom_label, mom_value = 0, "❓ Donnée indisponible", "N/A"
         details.append({"dim": "Momentum", "score": mom_score, "label": mom_label, "value": mom_value})
+
         struct_score = 1 if unified_score.get("structure", -1) > 0 else 0
         info = self.dm.analyze_ticker(ticker)
         if info and info["sma20"] and info["prix"]:
@@ -1747,6 +1797,7 @@ class StrategicEngine:
         else:
             st_label, st_value = "❓ Donnée indisponible", "N/A"
         details.append({"dim": "Structure", "score": struct_score, "label": st_label, "value": st_value})
+
         lead_score = 1 if unified_score.get("leadership", -2) > 0 else 0
         rs = self.dm.relative_strength_slope(ticker, 14)
         if rs is not None:
@@ -1755,10 +1806,12 @@ class StrategicEngine:
         else:
             lead_label, lead_value = "❓ Donnée indisponible", "N/A"
         details.append({"dim": "Leadership", "score": lead_score, "label": lead_label, "value": lead_value})
+
         reg_score = regime.get("confirmed_score", 0)
         macro_ok = reg_score >= 1
         macro_label = f"✅ Environnement favorable ({regime['confirmed_label']})" if macro_ok else f"❌ Environnement difficile ({regime['confirmed_label']})"
         details.append({"dim": "Macro", "score": 1 if macro_ok else 0, "label": macro_label, "value": f"Score {reg_score:+d}/5"})
+
         vol = self.qre.rolling_volatility(ticker, 30)
         if vol is not None:
             risk_ok = vol < 0.25
@@ -1767,11 +1820,16 @@ class StrategicEngine:
         else:
             risk_label, risk_value = "❓ Donnée indisponible", "N/A"
         details.append({"dim": "Risque", "score": 1 if (vol is not None and vol < 0.25) else 0, "label": risk_label, "value": risk_value})
+
         total = sum(d["score"] for d in details)
-        if total >= 4: verdict, verdict_cls = "✅ Conditions très favorables --- Maintien recommandé", "verdict-green"
-        elif total >= 3: verdict, verdict_cls = "🟡 Conditions correctes --- Maintien avec surveillance", "verdict-orange"
-        elif total >= 2: verdict, verdict_cls = "🟠 Conditions mitigées --- Prudence conseillée", "verdict-orange"
-        else: verdict, verdict_cls = "🔴 Conditions défavorables --- Réduction recommandée", "verdict-red"
+        if total >= 4:
+            verdict, verdict_cls = "✅ Conditions très favorables --- Maintien recommandé", "verdict-green"
+        elif total >= 3:
+            verdict, verdict_cls = "🟡 Conditions correctes --- Maintien avec surveillance", "verdict-orange"
+        elif total >= 2:
+            verdict, verdict_cls = "🟠 Conditions mitigées --- Prudence conseillée", "verdict-orange"
+        else:
+            verdict, verdict_cls = "🔴 Conditions défavorables --- Réduction recommandée", "verdict-red"
         return {"total": total, "details": details, "verdict": verdict, "verdict_cls": verdict_cls}
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1779,8 +1837,10 @@ class StrategicEngine:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def net_apres_impots(enveloppe: str, montant: float, val_poche: float, gain_poche: float) -> Tuple[float, str]:
-    if montant <= 0: return 0.0, ""
-    if montant > val_poche: return 0.0, "⚠️ Montant supérieur à la valeur de la poche"
+    if montant <= 0:
+        return 0.0, ""
+    if montant > val_poche:
+        return 0.0, "⚠️ Montant supérieur à la valeur de la poche"
     ratio_gain = gain_poche / val_poche if val_poche else 0
     gain_retrait = montant * ratio_gain
     now_tz = datetime.now(ZoneInfo("Europe/Paris"))
@@ -1804,17 +1864,22 @@ def net_apres_impots(enveloppe: str, montant: float, val_poche: float, gain_poch
 _PLOTLY_BASE = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#CBD5E1", family="DM Sans"))
 
 def plot_equity_curve(history: pd.DataFrame) -> Optional[go.Figure]:
-    if history.empty or "capital_cloture" not in history.columns: return None
+    if history.empty or "capital_cloture" not in history.columns:
+        return None
     df = history.dropna(subset=["capital_cloture"]).copy()
-    if len(df) < 2: return None
+    if len(df) < 2:
+        return None
     df["date_dt"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.dropna(subset=["date_dt"]).sort_values("date_dt")
     fig = go.Figure()
-    regime_colors = {"Euphorie": "rgba(168,85,247,.10)", "Expansion": "rgba(34,197,94,.10)",
-                     "Neutre": "rgba(59,130,246,.08)", "Stress": "rgba(245,158,11,.10)",
-                     "Contraction": "rgba(255,49,49,.12)"}
+    regime_colors = {
+        "Euphorie": "rgba(168,85,247,.10)", "Expansion": "rgba(34,197,94,.10)",
+        "Neutre": "rgba(59,130,246,.08)", "Stress": "rgba(245,158,11,.10)",
+        "Contraction": "rgba(255,49,49,.12)"
+    }
     if "regime" in df.columns:
-        prev = None; x0 = df["date_dt"].iloc[0]
+        prev = None
+        x0 = df["date_dt"].iloc[0]
         for _, row in df.iterrows():
             if row.get("regime") != prev and prev is not None:
                 fig.add_vrect(x0=x0, x1=row["date_dt"], fillcolor=regime_colors.get(prev, "rgba(255,255,255,.03)"), layer="below", line_width=0)
@@ -1822,108 +1887,185 @@ def plot_equity_curve(history: pd.DataFrame) -> Optional[go.Figure]:
             prev = row.get("regime")
         if prev:
             fig.add_vrect(x0=x0, x1=df["date_dt"].iloc[-1], fillcolor=regime_colors.get(prev, "rgba(255,255,255,.03)"), layer="below", line_width=0)
-    fig.add_trace(go.Scatter(x=df["date_dt"], y=df["capital_cloture"], mode="lines+markers", line=dict(color="#D4AF37", width=2.5), marker=dict(size=5), name="Capital Clôture"))
+    fig.add_trace(go.Scatter(x=df["date_dt"], y=df["capital_cloture"], mode="lines+markers",
+                            line=dict(color="#D4AF37", width=2.5), marker=dict(size=5), name="Capital Clôture"))
     if "perf_cumul" in df.columns and df["perf_cumul"].notna().any():
-        fig.add_trace(go.Scatter(x=df["date_dt"], y=df["perf_cumul"], mode="lines", line=dict(color="#3B82F6", width=1.5, dash="dot"), name="Perf Cumul (%)", yaxis="y2"))
-    fig.update_layout(**_PLOTLY_BASE, title=dict(text="<b>Évolution de votre capital</b>", font=dict(size=13, color="#6B7585")),
-                      margin=dict(t=40, b=30, l=60, r=60), height=280, legend=dict(font=dict(size=10), bgcolor="rgba(0,0,0,0)", x=0, y=1.15, orientation="h"),
-                      xaxis=dict(gridcolor="#2E3340", showgrid=True), yaxis=dict(gridcolor="#2E3340", showgrid=True, ticksuffix="€", title="Capital (€)"),
-                      yaxis2=dict(overlaying="y", side="right", showgrid=False, ticksuffix="%", title="Perf (%)"))
+        fig.add_trace(go.Scatter(x=df["date_dt"], y=df["perf_cumul"], mode="lines",
+                                line=dict(color="#3B82F6", width=1.5, dash="dot"), name="Perf Cumul (%)", yaxis="y2"))
+    fig.update_layout(
+        **_PLOTLY_BASE,
+        title=dict(text="<b>Évolution de votre capital</b>", font=dict(size=13, color="#6B7585")),
+        margin=dict(t=40, b=30, l=60, r=60), height=280,
+        legend=dict(font=dict(size=10), bgcolor="rgba(0,0,0,0)", x=0, y=1.15, orientation="h"),
+        xaxis=dict(gridcolor="#2E3340", showgrid=True),
+        yaxis=dict(gridcolor="#2E3340", showgrid=True, ticksuffix="€", title="Capital (€)"),
+        yaxis2=dict(overlaying="y", side="right", showgrid=False, ticksuffix="%", title="Perf (%)")
+    )
     return fig
 
-def plot_weekly_leadership(labels: List[str], sat_perfs: List[float], world_perfs: List[float], sat_name: str, color_sat: str = "#D4AF37") -> go.Figure:
+def plot_weekly_leadership(labels: List[str], sat_perfs: List[float], world_perfs: List[float],
+                           sat_name: str, color_sat: str = "#D4AF37") -> go.Figure:
     fig = go.Figure()
     bar_colors_sat = ["#22C55E" if v > 0 else "#FF3131" for v in sat_perfs]
-    fig.add_trace(go.Bar(x=labels, y=sat_perfs, name=sat_name, marker_color=bar_colors_sat, text=[f"{v:+.1f}%" for v in sat_perfs], textposition="outside"))
+    fig.add_trace(go.Bar(x=labels, y=sat_perfs, name=sat_name, marker_color=bar_colors_sat,
+                         text=[f"{v:+.1f}%" for v in sat_perfs], textposition="outside"))
     bar_colors_world = ["rgba(59,130,246,.7)" if v > 0 else "rgba(59,130,246,.4)" for v in world_perfs]
-    fig.add_trace(go.Bar(x=labels, y=world_perfs, name="MSCI World", marker_color=bar_colors_world, text=[f"{v:+.1f}%" for v in world_perfs], textposition="outside"))
+    fig.add_trace(go.Bar(x=labels, y=world_perfs, name="MSCI World", marker_color=bar_colors_world,
+                         text=[f"{v:+.1f}%" for v in world_perfs], textposition="outside"))
     fig.add_hline(y=0, line_dash="dot", line_color="#4B5563", opacity=0.8)
-    fig.update_layout(**_PLOTLY_BASE, barmode="group", bargap=0.20, bargroupgap=0.05,
-                      title=dict(text=f"<b>Leadership hebdomadaire : {sat_name} vs MSCI World</b>", font=dict(size=13, color="#6B7585")),
-                      margin=dict(t=50, b=40, l=50, r=30), height=300, legend=dict(font=dict(size=11), bgcolor="rgba(0,0,0,0)", x=0, y=1.12, orientation="h"),
-                      xaxis=dict(gridcolor="#2E3340", showgrid=False), yaxis=dict(gridcolor="#2E3340", ticksuffix="%", zeroline=False))
+    fig.update_layout(
+        **_PLOTLY_BASE, barmode="group", bargap=0.20, bargroupgap=0.05,
+        title=dict(text=f"<b>Leadership hebdomadaire : {sat_name} vs MSCI World</b>", font=dict(size=13, color="#6B7585")),
+        margin=dict(t=50, b=40, l=50, r=30), height=300,
+        legend=dict(font=dict(size=11), bgcolor="rgba(0,0,0,0)", x=0, y=1.12, orientation="h"),
+        xaxis=dict(gridcolor="#2E3340", showgrid=False), yaxis=dict(gridcolor="#2E3340", ticksuffix="%", zeroline=False)
+    )
     return fig
 
 def plot_correlation_heatmap(corr_df: pd.DataFrame) -> go.Figure:
-    short = {"AASI.PA": "EM", "MWRD.PA": "World", "DCAM.PA": "W-PEA"}
+    short = {
+        "WMMS.XETRA": "WMMS", "WMMS.DE": "WMMS", "MWRD.PA": "World", "DCAM.PA": "W-PEA",
+        "KRW.PA": "Korea", "CHIP.PA": "CHIP", "LYXTNOW.PA": "InfoTech", "IJPE.PA": "JapSC",
+        "CV9.PA": "EuVal", "LYXFINW.PA": "Fin"
+    }
     labels = [short.get(c, c) for c in corr_df.columns]
-    fig = go.Figure(go.Heatmap(z=corr_df.values.round(2), x=labels, y=labels, colorscale=[[0,"#FF3131"],[0.5,"#252932"],[1,"#22C55E"]], zmid=0, zmin=-1, zmax=1,
-                               text=corr_df.values.round(2), texttemplate="%{text:.2f}", hovertemplate="<b>%{y} / %{x}</b><br>ρ = %{z:.2f}<extra></extra>",
-                               showscale=True, colorbar=dict(tickfont=dict(color="#CBD5E1", size=9), thickness=12, len=0.8, bgcolor="rgba(0,0,0,0)")))
-    fig.update_layout(**_PLOTLY_BASE, title=dict(text="<b>Corrélation Pearson (60j)</b>", font=dict(size=12, color="#6B7585")),
-                      margin=dict(t=40, b=10, l=60, r=20), height=220)
+    fig = go.Figure(go.Heatmap(
+        z=corr_df.values.round(2), x=labels, y=labels,
+        colorscale=[[0, "#FF3131"], [0.5, "#252932"], [1, "#22C55E"]],
+        zmid=0, zmin=-1, zmax=1,
+        text=corr_df.values.round(2), texttemplate="%{text:.2f}",
+        hovertemplate="<b>%{y} / %{x}</b><br>ρ = %{z:.2f}<extra></extra>",
+        showscale=True,
+        colorbar=dict(tickfont=dict(color="#CBD5E1", size=9), thickness=12, len=0.8, bgcolor="rgba(0,0,0,0)")
+    ))
+    fig.update_layout(
+        **_PLOTLY_BASE,
+        title=dict(text="<b>Corrélation Pearson (60j)</b>", font=dict(size=12, color="#6B7585")),
+        margin=dict(t=40, b=10, l=60, r=20), height=220
+    )
     return fig
 
 def plot_risk_contribution(rc: Dict) -> Optional[go.Figure]:
-    if not rc: return None
-    short = {"AASI.PA": "EM Asia", "MWRD.PA": "MSCI World", "DCAM.PA": "World PEA"}
+    if not rc:
+        return None
+    short = {
+        "WMMS.XETRA": "WMMS", "WMMS.DE": "WMMS", "MWRD.PA": "World", "DCAM.PA": "W-PEA",
+        "KRW.PA": "Korea", "CHIP.PA": "CHIP"
+    }
     names = [short.get(tk, tk) for tk in rc]
     values = [rc[tk]["rc_pct"] for tk in rc]
     colors = ["#FF3131" if rc[tk]["flag"] else "#007BFF" for tk in rc]
-    fig = go.Figure(go.Bar(x=values, y=names, orientation="h", marker_color=colors, hovertemplate="%{y}: <b>%{x:.1f}%</b>"))
-    fig.add_vline(x=40, line_dash="dash", line_color="#FF3131", annotation_text="Seuil 40%", annotation_font=dict(color="#FF3131", size=9))
-    fig.update_layout(**_PLOTLY_BASE, title=dict(text="<b>Risk Contribution (%)</b>", font=dict(size=12, color="#6B7585")),
-                      margin=dict(t=40, b=10, l=80, r=20), height=200, xaxis=dict(gridcolor="#2E3340", ticksuffix="%"), yaxis=dict(gridcolor="rgba(0,0,0,0)"))
+    fig = go.Figure(go.Bar(x=values, y=names, orientation="h", marker_color=colors,
+                           hovertemplate="%{y}: <b>%{x:.1f}%</b>"))
+    fig.add_vline(x=40, line_dash="dash", line_color="#FF3131",
+                  annotation_text="Seuil 40%", annotation_font=dict(color="#FF3131", size=9))
+    fig.update_layout(
+        **_PLOTLY_BASE,
+        title=dict(text="<b>Risk Contribution (%)</b>", font=dict(size=12, color="#6B7585")),
+        margin=dict(t=40, b=10, l=80, r=20), height=200,
+        xaxis=dict(gridcolor="#2E3340", ticksuffix="%"), yaxis=dict(gridcolor="rgba(0,0,0,0)")
+    )
     return fig
 
 def plot_weight_indicator(current_pct: float, target_pct: float) -> go.Figure:
     fig = go.Figure(go.Indicator(
-        mode="gauge+number+delta", value=round(current_pct, 1), number={"suffix": "%", "font": {"size": 26, "color": "#CBD5E1", "family": "Space Mono"}},
-        delta={"reference": target_pct, "relative": False, "increasing": {"color": "#F97316"}, "decreasing": {"color": "#22C55E"}, "suffix": "%", "valueformat": ".1f"},
-        title={"text": "Poids Actuel<br><span style='font-size:.8em;color:#6B7585'>vs Cible (or)</span>", "font": {"size": 11, "color": "#8892AA"}},
-        gauge={"axis": {"range": [0, 35], "tickcolor": "#6B7585", "tickfont": {"size": 9}, "nticks": 8},
-               "bar": {"color": "#007BFF", "thickness": 0.28}, "bgcolor": "rgba(0,0,0,0)", "borderwidth": 0,
-               "steps": [{"range": [0,5], "color": "rgba(255,49,49,.18)"}, {"range": [5,15], "color": "rgba(249,115,22,.12)"},
-                         {"range": [15,25], "color": "rgba(34,197,94,.12)"}, {"range": [25,35], "color": "rgba(212,175,55,.10)"}],
-               "threshold": {"line": {"color": "#D4AF37", "width": 4}, "thickness": 0.85, "value": round(target_pct, 1)}}))
-    fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", font={"color": "#CBD5E1", "family": "DM Sans"}, margin={"t": 50, "b": 10, "l": 20, "r": 20}, height=230)
+        mode="gauge+number+delta",
+        value=round(current_pct, 1),
+        number={"suffix": "%", "font": {"size": 26, "color": "#CBD5E1", "family": "Space Mono"}},
+        delta={"reference": target_pct, "relative": False, "increasing": {"color": "#F97316"},
+               "decreasing": {"color": "#22C55E"}, "suffix": "%", "valueformat": ".1f"},
+        title={"text": "Poids Actuel<br><span style='font-size:.8em;color:#6B7585'>vs Cible (or)</span>",
+               "font": {"size": 11, "color": "#8892AA"}},
+        gauge={
+            "axis": {"range": [0, 35], "tickcolor": "#6B7585", "tickfont": {"size": 9}, "nticks": 8},
+            "bar": {"color": "#007BFF", "thickness": 0.28},
+            "bgcolor": "rgba(0,0,0,0)", "borderwidth": 0,
+            "steps": [
+                {"range": [0, 5], "color": "rgba(255,49,49,.18)"},
+                {"range": [5, 15], "color": "rgba(249,115,22,.12)"},
+                {"range": [15, 25], "color": "rgba(34,197,94,.12)"},
+                {"range": [25, 35], "color": "rgba(212,175,55,.10)"}
+            ],
+            "threshold": {"line": {"color": "#D4AF37", "width": 4}, "thickness": 0.85,
+                          "value": round(target_pct, 1)}
+        }
+    ))
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)", font={"color": "#CBD5E1", "family": "DM Sans"},
+        margin={"t": 50, "b": 10, "l": 20, "r": 20}, height=230
+    )
     return fig
 
 def plot_alpha_bars(dm: DataManager, ticker: str, nom: str) -> Optional[go.Figure]:
     world_df = None
     for wt in WORLD_TICKERS:
         df = dm.data.get(wt, pd.DataFrame())
-        if not df.empty and "Close" in df.columns: world_df = df; break
+        if not df.empty and "Close" in df.columns:
+            world_df = df
+            break
     sat_df = dm.data.get(ticker, pd.DataFrame())
-    if world_df is None or sat_df is None or sat_df.empty: return None
-    wc = world_df["Close"].dropna(); sc = sat_df["Close"].dropna()
+    if world_df is None or sat_df is None or sat_df.empty:
+        return None
+    wc = world_df["Close"].dropna()
+    sc = sat_df["Close"].dropna()
     common = sc.index.intersection(wc.index)
-    if len(common) < 17: return None
+    if len(common) < 17:
+        return None
     alpha = ((sc[common[-16:]].pct_change() - wc[common[-16:]].pct_change()) * 100).dropna().iloc[-15:]
-    fig = go.Figure(go.Bar(x=[d.strftime("%d/%m") for d in alpha.index], y=alpha.values, marker_color=["#22C55E" if v > 0 else "#FF3131" for v in alpha.values]))
+    fig = go.Figure(go.Bar(
+        x=[d.strftime("%d/%m") for d in alpha.index],
+        y=alpha.values,
+        marker_color=["#22C55E" if v > 0 else "#FF3131" for v in alpha.values]
+    ))
     fig.add_hline(y=0, line_dash="dot", line_color="#6B7585", opacity=.6)
-    fig.update_layout(**_PLOTLY_BASE, title=dict(text=f"<b>Écart quotidien</b> : {nom} vs MSCI World --- 15 derniers jours", font=dict(size=11, color="#6B7585")),
-                      margin=dict(t=35, b=25, l=55, r=15), height=200, showlegend=False, xaxis=dict(gridcolor="#2E3340", showgrid=False), yaxis=dict(gridcolor="#2E3340", ticksuffix="%"))
+    fig.update_layout(
+        **_PLOTLY_BASE,
+        title=dict(text=f"<b>Écart quotidien</b> : {nom} vs MSCI World --- 15 derniers jours",
+                   font=dict(size=11, color="#6B7585")),
+        margin=dict(t=35, b=25, l=55, r=15), height=200,
+        showlegend=False, xaxis=dict(gridcolor="#2E3340", showgrid=False),
+        yaxis=dict(gridcolor="#2E3340", ticksuffix="%")
+    )
     return fig
 
 def plot_relative_perf(dm: DataManager, ticker: str, nom: str) -> Optional[go.Figure]:
     world_df = None
     for wt in WORLD_TICKERS:
         df = dm.data.get(wt, pd.DataFrame())
-        if not df.empty and "Close" in df.columns: world_df = df; break
+        if not df.empty and "Close" in df.columns:
+            world_df = df
+            break
     sat_df = dm.data.get(ticker, pd.DataFrame())
-    if world_df is None or sat_df is None or sat_df.empty: return None
-    wc = world_df["Close"].dropna(); sc = sat_df["Close"].dropna()
+    if world_df is None or sat_df is None or sat_df.empty:
+        return None
+    wc = world_df["Close"].dropna()
+    sc = sat_df["Close"].dropna()
     common = sc.index.intersection(wc.index)
-    if len(common) < 20: return None
+    if len(common) < 20:
+        return None
     cutoff = max(DATE_DEBUT.date(), (datetime.now() - timedelta(days=120)).date())
     common_f = [d for d in common if d.date() >= cutoff] or list(common[-90:])
     ratio = sc[common_f] / wc[common_f]
     rel = (ratio / ratio.iloc[0] - 1) * 100
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=rel.index, y=rel.values.clip(min=0), fill="tozeroy", fillcolor="rgba(212,175,55,.12)", line=dict(color="rgba(0,0,0,0)"), showlegend=False))
-    fig.add_trace(go.Scatter(x=rel.index, y=rel.values.clip(max=0), fill="tozeroy", fillcolor="rgba(255,49,49,.12)", line=dict(color="rgba(0,0,0,0)"), showlegend=False))
+    fig.add_trace(go.Scatter(x=rel.index, y=rel.values.clip(min=0), fill="tozeroy",
+                             fillcolor="rgba(212,175,55,.12)", line=dict(color="rgba(0,0,0,0)"), showlegend=False))
+    fig.add_trace(go.Scatter(x=rel.index, y=rel.values.clip(max=0), fill="tozeroy",
+                             fillcolor="rgba(255,49,49,.12)", line=dict(color="rgba(0,0,0,0)"), showlegend=False))
     fig.add_trace(go.Scatter(x=rel.index, y=rel.values, line=dict(color="#D4AF37", width=2), name=f"{nom}/World"))
     if len(rel) >= 14:
         last14 = rel.iloc[-14:]
         fig.add_vrect(x0=last14.index[0], x1=last14.index[-1], fillcolor="rgba(0,123,255,.06)", layer="below", line_width=0)
     fig.add_hline(y=0, line_dash="dot", line_color="#6B7585", opacity=.7)
-    fig.update_layout(**_PLOTLY_BASE, title=dict(text=f"Performance relative : {nom} vs World (base 100)", font=dict(size=11, color="#6B7585")),
-                      margin=dict(t=20, b=20, l=50, r=20), height=200, showlegend=False, xaxis=dict(gridcolor="#2E3340"), yaxis=dict(gridcolor="#2E3340", ticksuffix="%"))
+    fig.update_layout(
+        **_PLOTLY_BASE,
+        title=dict(text=f"Performance relative : {nom} vs World (base 100)", font=dict(size=11, color="#6B7585")),
+        margin=dict(t=20, b=20, l=50, r=20), height=200,
+        showlegend=False, xaxis=dict(gridcolor="#2E3340"), yaxis=dict(gridcolor="#2E3340", ticksuffix="%")
+    )
     return fig
-
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 15 : STREAMLIT UI v5.8 (simplifié World + EM Asia)
+# MODULE 15 : STREAMLIT UI v5.9 (adapté pour le nouveau portefeuille)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class StreamlitUI:
@@ -1949,12 +2091,12 @@ class StreamlitUI:
     def _sign(v: float) -> str:
         return "+" if v >= 0 else ""
 
-    # ── SIDEBAR (simplifié) ──
+    # ── SIDEBAR ──
     def render_sidebar(self) -> Tuple[bool, List[Dict], float, float, float]:
-        st.sidebar.markdown("## ⚙️ Paramètres v5.8")
+        st.sidebar.markdown("## ⚙️ Paramètres v5.9")
         mode_direct = st.sidebar.toggle("🔌 Mode Direct (Vue Brute)", value=False)
         st.sidebar.markdown("---")
-        cap = st.sidebar.number_input("Capital réel sorti banque (€)", value=st.session_state["cfg_capital_reel"], step=100.0, format="%.2f", key="input_capital_reel")
+        cap = st.sidebar.number_input("Capital investi (€)", value=st.session_state["cfg_capital_reel"], step=100.0, format="%.2f", key="input_capital_reel")
         adj = st.sidebar.number_input("Ajustement patrimonial (€)", value=st.session_state["cfg_ajustement_pat"], step=1.0, format="%.2f", key="input_ajustement_pat")
         bonus = st.sidebar.number_input("Bonus Fortuneo (PRM PEA, €)", value=st.session_state["cfg_bonus_fortuneo"], step=10.0, format="%.2f", key="input_bonus_fortuneo")
         if st.sidebar.button("💾 Sauvegarder paramètres", use_container_width=True):
@@ -1965,7 +2107,8 @@ class StreamlitUI:
             st.session_state["save_feedback"] = "✅ Sauvegardé" if ok else "❌ Erreur"
         if st.session_state.get("save_feedback"):
             fb = st.session_state["save_feedback"]
-            st.sidebar.markdown(f'<div class="{"save-box" if fb.startswith("✅") else "alert-box"}">{fb}</div>', unsafe_allow_html=True)
+            cls = "save-box" if fb.startswith("✅") else "alert-box"
+            st.sidebar.markdown(f'<div class="{cls}">{fb}</div>', unsafe_allow_html=True)
         st.sidebar.markdown("---")
 
         with st.sidebar.expander("⚙️ Configuration des Positions", expanded=False):
@@ -2056,7 +2199,7 @@ class StreamlitUI:
         st.markdown('<div style="display:flex;align-items:baseline;gap:1rem;margin-bottom:.2rem;">'
                     '<span style="font-family:Space Mono;font-size:1.6rem;font-weight:700;color:#D4AF37;">◈</span>'
                     '<span style="font-size:1.5rem;font-weight:700;color:#E2E8F0;">COCKPIT DÉCISIONNEL</span>'
-                    '<span style="font-family:Space Mono;font-size:.9rem;color:#6B7585;">v5.8 · ALLOCATION LONG TERME</span></div>', unsafe_allow_html=True)
+                    '<span style="font-family:Space Mono;font-size:.9rem;color:#6B7585;">v5.9 · MULTI-ETF</span></div>', unsafe_allow_html=True)
         c1, c2 = st.columns([3, 1])
         with c1:
             st.caption(f"Prix live · {now.strftime('%d/%m/%Y %H:%M:%S')} (Paris) · Cache 30s/90s")
@@ -2083,7 +2226,7 @@ class StreamlitUI:
             reg_trans = self.pde.translate_regime(regime)
             col_exp, col_comp = st.columns([1, 2])
             with col_exp:
-                level_color = {"green":"#22C55E","orange":"#F97316","red":"#FF3131"}.get(reg_trans["level"], "#6B7585")
+                level_color = {"green": "#22C55E", "orange": "#F97316", "red": "#FF3131"}.get(reg_trans["level"], "#6B7585")
                 st.markdown(f'<div class="pedagogy-box"><div class="pedagogy-title">Ce que ça signifie</div>'
                             f'<div style="font-size:2rem;text-align:center;margin:.4rem 0;">{reg_trans["emoji"]}</div>'
                             f'<div style="color:{level_color};font-weight:700;margin-bottom:.4rem;">{label}</div>'
@@ -2221,34 +2364,42 @@ class StreamlitUI:
                 vj_f = f"{self._sign(p2['var_jour_pct'])}{p2['var_jour_pct']:.2f}%" if p2["var_jour_pct"] else "--"
                 vje_f = f"{self._sign(p2['var_jour_eur'])}{p2['var_jour_eur']:,.2f}€" if p2["var_jour_eur"] else "--"
                 prix_f = f"{p2['prix']:.3f}€" if p2["prix"] else "N/A"
-                rows.append({"Position": p2["nom"], "Env.": p2["enveloppe"], "Prix": prix_f, "Valeur (€)": f"{p2['valeur']:,.2f}",
-                             "Perf. (%)": perf_f, "Perf. (€)": perf_euro_str, "Δ Jour (%)": vj_f, "Δ Jour (€)": vje_f})
+                rows.append({
+                    "Position": p2["nom"], "Env.": p2["enveloppe"], "Prix": prix_f,
+                    "Valeur (€)": f"{p2['valeur']:,.2f}", "Perf. (%)": perf_f,
+                    "Perf. (€)": perf_euro_str, "Δ Jour (%)": vj_f, "Δ Jour (€)": vje_f
+                })
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         if not mode_direct:
             st.markdown(f'<div class="info-box">Ajustement patrimonial inclus : +{ptf["ajustement_pat"]:,.2f}€</div>', unsafe_allow_html=True)
         with col_p:
             donut = [p2 for p2 in ptf["positions"] if p2["valeur"] > 0]
             if donut:
-                colors_pie = ["#007BFF","#6366F1","#D4AF37","#F97316","#22C55E"]
-                fig_pie = go.Figure(go.Pie(labels=[d["nom"] for d in donut], values=[d["valeur"] for d in donut], hole=0.6, textinfo="percent",
-                                          marker=dict(colors=colors_pie[:len(donut)], line=dict(color="#1C1F26", width=2))))
+                colors_pie = ["#007BFF", "#6366F1", "#D4AF37", "#F97316", "#22C55E", "#A855F7", "#FF6B6B"]
+                fig_pie = go.Figure(go.Pie(
+                    labels=[d["nom"] for d in donut],
+                    values=[d["valeur"] for d in donut],
+                    hole=0.6, textinfo="percent",
+                    marker=dict(colors=colors_pie[:len(donut)], line=dict(color="#1C1F26", width=2))
+                ))
                 vt = ptf["valeur_totale"]
-                fig_pie.update_layout(**_PLOTLY_BASE, margin=dict(t=10,b=10,l=10,r=10), height=270,
-                                      legend=dict(font=dict(size=10), bgcolor="rgba(0,0,0,0)"),
-                                      annotations=[dict(text=f"{vt:,.0f}€", x=.5, y=.5, font=dict(size=13,color="#D4AF37",family="Space Mono"), showarrow=False)])
+                fig_pie.update_layout(
+                    **_PLOTLY_BASE, margin=dict(t=10, b=10, l=10, r=10), height=270,
+                    legend=dict(font=dict(size=10), bgcolor="rgba(0,0,0,0)"),
+                    annotations=[dict(text=f"{vt:,.0f}€", x=.5, y=.5, font=dict(size=13, color="#D4AF37", family="Space Mono"), showarrow=False)]
+                )
                 st.plotly_chart(fig_pie, use_container_width=True)
         mwr_adj = bench.get("perf_bench_adj")
         if mwr_adj is not None:
             gap = bench.get("gap", 0.0) or 0.0
             gc = "#22C55E" if gap >= 0 else "#FF3131"
-            st.markdown(f'<div class="pedagogy-box"><div class="pedagogy-title">🆕 v5.8 --- Benchmark MWR Cash-Flow Adjusted</div>'
-                        f'Le "Gap vs World" est désormais calculé en simulant l\'achat de MWRD.PA '
-                        f'aux mêmes dates et montants que vos flux réels (avec 0.10% de frais). '
+            st.markdown(f'<div class="pedagogy-box"><div class="pedagogy-title">🆕 v5.9 --- Benchmark MWR Cash-Flow Adjusted</div>'
+                        f'Le "Gap vs World" est calculé en simulant l\'achat de MWRD.PA aux mêmes dates et montants que vos flux réels. '
                         f'<b>World MWR = {s(mwr_adj)}{mwr_adj:.2f}%</b> · '
                         f'<b style="color:{gc};">Votre Alpha = {s(gap)}{gap:.2f}%</b></div>', unsafe_allow_html=True)
 
     # ── EQUITY CURVE ──
-    def render_equity_curve_section(self, ptf: Dict, regime: Dict, unified_em: Dict, positions_conf: List[Dict]):
+    def render_equity_curve_section(self, ptf: Dict, regime: Dict, positions_conf: List[Dict]):
         st.markdown("## 📈 Historique de votre capital")
         col_eq, col_snap = st.columns([3, 1])
         history = self.pm.load_history()
@@ -2276,12 +2427,16 @@ class StreamlitUI:
             st.caption("Sauvegardez l'état du portefeuille ce soir.")
             vt = ptf["valeur_totale"]
             pj, pc, _ = self.pm.compute_daily_performance(vt)
-            poids_em = next((p["valeur"]/vt*100 for p in ptf["positions"] if p["nom"]=="EM Asia" and vt>0), 0.0)
+            # Calcul du poids des satellites (KRW + CHIP)
+            krw_v = next((p["valeur"] for p in ptf["positions"] if p["nom"] == "MSCI Korea"), 0)
+            chip_v = next((p["valeur"] for p in ptf["positions"] if p["nom"] == "MSCI Semiconductors"), 0)
+            poids_sat = (krw_v + chip_v) / vt * 100 if vt else 0
             st.markdown(f'<div style="font-size:.82rem;color:#6B7585;line-height:1.8;"><b>Capital :</b> {vt:,.2f}€<br>'
                         f'<b>Aujourd\'hui :</b> {pj:+.2f}%<br><b>Total :</b> {pc:+.2f}%<br>'
-                        f'<b>Régime :</b> {regime["confirmed_label"]}<br><b>EM Asia :</b> {poids_em:.1f}%</div>', unsafe_allow_html=True)
+                        f'<b>Régime :</b> {regime["confirmed_label"]}<br><b>Satellites :</b> {poids_sat:.1f}%</div>', unsafe_allow_html=True)
             if st.button("📸 Enregistrer Snapshot", use_container_width=True, type="primary"):
-                ok = self.pm.save_snapshot(vt, vt, round(pj,4), round(pc,4), regime["confirmed_label"], regime["confirmed_score"], round(poids_em,4))
+                ok = self.pm.save_snapshot(vt, vt, round(pj, 4), round(pc, 4), regime["confirmed_label"],
+                                           regime["confirmed_score"], round(poids_sat, 4))
                 if ok:
                     st.success("✅ Enregistré" + (" + GitHub" if self.pm.status == "github" else ""))
                     st.cache_data.clear()
@@ -2316,8 +2471,8 @@ class StreamlitUI:
                     rows_lead.append({"Semaine": lbl, f"{nom[:8]}": f"{s_p:+.1f}%", "World": f"{w_p:+.1f}%", "Résultat": winner})
                 st.dataframe(pd.DataFrame(rows_lead), use_container_width=True, hide_index=True)
                 verdict = self.pde.translate_leadership(nom, gaps)
-                level_color = {"green":"#22C55E","orange":"#F97316","red":"#FF3131"}.get(verdict["level"], "#6B7585")
-                level_bg = {"green":"rgba(34,197,94,.1)","orange":"rgba(249,115,22,.1)","red":"rgba(255,49,49,.1)"}.get(verdict["level"], "rgba(107,117,133,.1)")
+                level_color = {"green": "#22C55E", "orange": "#F97316", "red": "#FF3131"}.get(verdict["level"], "#6B7585")
+                level_bg = {"green": "rgba(34,197,94,.1)", "orange": "rgba(249,115,22,.1)", "red": "rgba(255,49,49,.1)"}.get(verdict["level"], "rgba(107,117,133,.1)")
                 st.markdown(f'<div style="background:{level_bg};border:1px solid {level_color};border-radius:10px;padding:1rem;margin-top:.5rem;">'
                             f'<div style="font-weight:700;font-size:1rem;color:{level_color};">{verdict["message"]}</div>'
                             f'<div style="font-size:.8rem;color:#8892AA;margin:.4rem 0;">{verdict["detail"]}</div>'
@@ -2334,10 +2489,25 @@ class StreamlitUI:
                         '<b>Sensibilité (Beta)</b> : si le marché baisse de 10% et Beta=1.5, l\'ETF peut baisser de 15%.<br><br>'
                         '<b>Recul depuis le sommet (Drawdown)</b> : distance depuis le dernier pic. -20% signifie une perte de 20%.</div>', unsafe_allow_html=True)
         st.markdown("### 🔍 Analyse de risque par ETF")
-        risk_assets = [("AASI.PA", "EM Asia", "#6366F1", None), ("MWRD.PA", "MSCI World", "#007BFF", None)]
-        cols = st.columns(2)
+        # Sélectionner les ETF du portefeuille
+        risk_assets = []
+        for pos in ptf["positions"]:
+            if pos.get("ticker") and pos["valeur"] > 0:
+                ticker = pos["ticker"]
+                name = pos["nom"]
+                # Couleur selon l'ETF
+                color_map = {
+                    "WMMS.XETRA": "#D4AF37",
+                    "DCAM.PA": "#007BFF",
+                    "MWRD.PA": "#3B82F6",
+                    "KRW.PA": "#F97316",
+                    "CHIP.PA": "#A855F7"
+                }
+                color = color_map.get(ticker, "#6366F1")
+                risk_assets.append((ticker, name, color, None))
+        cols = st.columns(min(len(risk_assets), 4))
         for i, (tk, name, color, custom_df) in enumerate(risk_assets):
-            with cols[i]:
+            with cols[i % len(cols)]:
                 if custom_df is not None:
                     vol = self.qre.rolling_volatility_from_df(custom_df, 30)
                     beta = self.qre.rolling_beta_from_df(custom_df)
@@ -2349,7 +2519,7 @@ class StreamlitUI:
                 vol_t = self.pde.translate_volatility(vol, name)
                 beta_t = self.pde.translate_beta(beta, name)
                 dd_t = self.pde.translate_drawdown(dd.get("current_dd"), dd.get("max_dd"), name)
-                level_colors = {"green":"#22C55E","orange":"#F97316","red":"#FF3131"}
+                level_colors = {"green": "#22C55E", "orange": "#F97316", "red": "#FF3131"}
                 st.markdown(f'<div class="card" style="border-top:3px solid {color};"><div class="kpi-label">{name}</div>', unsafe_allow_html=True)
                 vc = level_colors[vol_t["level"]]
                 st.markdown(f'<div class="pedago-metric"><div class="pedago-metric-title">Agitation (Volatilité)</div>'
@@ -2367,16 +2537,19 @@ class StreamlitUI:
                 st.markdown('</div>', unsafe_allow_html=True)
         with st.expander("🔬 Analyse experte : Corrélation & Contribution au risque", expanded=False):
             col_corr, col_rc = st.columns(2)
-            tickers_ptf = ["AASI.PA", "MWRD.PA"]
+            tickers_ptf = [pos["ticker"] for pos in ptf["positions"] if pos.get("ticker") and pos["valeur"] > 0]
             positions_map = {p["nom"]: p for p in ptf["positions"]}
             vt = ptf["valeur_totale"]
             with col_corr:
-                corr_df = self.qre.correlation_matrix(tickers_ptf, 60)
-                if corr_df is not None:
-                    st.plotly_chart(plot_correlation_heatmap(corr_df), use_container_width=True, config={"displayModeBar": False})
-                    st.markdown('<div class="pedagogy-box">Une corrélation proche de +1 signifie que les deux ETFs bougent ensemble. Idéalement, ils ne devraient pas tous monter et baisser en même temps.</div>', unsafe_allow_html=True)
+                if len(tickers_ptf) >= 2:
+                    corr_df = self.qre.correlation_matrix(tickers_ptf, 60)
+                    if corr_df is not None:
+                        st.plotly_chart(plot_correlation_heatmap(corr_df), use_container_width=True, config={"displayModeBar": False})
+                        st.markdown('<div class="pedagogy-box">Une corrélation proche de +1 signifie que les deux ETFs bougent ensemble. Idéalement, ils ne devraient pas tous monter et baisser en même temps.</div>', unsafe_allow_html=True)
+                    else:
+                        st.info("Données insuffisantes (< 60j).")
                 else:
-                    st.info("Données insuffisantes (< 60j).")
+                    st.info("Ajoutez au moins 2 ETF pour voir la corrélation.")
             with col_rc:
                 weights_ptf, valid_tk = [], []
                 for tk in tickers_ptf:
@@ -2384,8 +2557,9 @@ class StreamlitUI:
                     if not df.empty:
                         nom = next((p["nom"] for p in ptf["positions"] if p.get("ticker") == tk), "")
                         val = positions_map.get(nom, {}).get("valeur", 0.0)
-                        valid_tk.append(tk); weights_ptf.append(val)
-                if valid_tk and sum(weights_ptf) > 0:
+                        valid_tk.append(tk)
+                        weights_ptf.append(val)
+                if valid_tk and sum(weights_ptf) > 0 and len(valid_tk) >= 2:
                     rc = self.qre.risk_contribution(valid_tk, weights_ptf, 60)
                     if rc:
                         fig_rc = plot_risk_contribution(rc)
@@ -2393,14 +2567,17 @@ class StreamlitUI:
                             st.plotly_chart(fig_rc, use_container_width=True, config={"displayModeBar": False})
                         flags = [tk for tk, v in rc.items() if v["flag"]]
                         if flags:
-                            short = {"AASI.PA": "EM Asia", "MWRD.PA": "MSCI World"}
+                            short = {
+                                "WMMS.XETRA": "WMMS", "WMMS.DE": "WMMS", "MWRD.PA": "World",
+                                "DCAM.PA": "W-PEA", "KRW.PA": "Korea", "CHIP.PA": "CHIP"
+                            }
                             f_names = ", ".join([short.get(f, f) for f in flags])
                             st.markdown(f'<div class="alert-box">🚨 <b>Trop de risque concentré</b> : {f_names} représente plus de 40% du risque total. Rééquilibrez.</div>', unsafe_allow_html=True)
 
-    # ── SATELLITE CARD PÉDAGOGIQUE (pour EM Asia) ──
+    # ── SATELLITE CARD PÉDAGOGIQUE ──
     def render_satellite_card_pedagogic(self, nom: str, ticker: str, unified: Dict, target_weight: Dict,
                                         regime: Dict, sent_rows: List[Dict], sector: str):
-        color_map = {"em_asia": "#6366F1"}
+        color_map = {"korea": "#F97316", "chip": "#A855F7"}
         color = color_map.get(sector, "#D4AF37")
         strat_full = self.se.compute(ticker, unified, regime)
         simple_score = self.pde.translate_simple_score(unified["total"])
@@ -2429,8 +2606,8 @@ class StreamlitUI:
                     f'<div style="font-size:.82rem;margin-top:.4rem;">💡 {simple_score["action"]}</div></div>', unsafe_allow_html=True)
         self.render_leadership_comparison(nom, ticker, color)
         sent_verdict = self.pde.translate_sentinelles(sent_rows, sector)
-        lv_color = {"green":"#22C55E","orange":"#F97316","red":"#FF3131"}.get(sent_verdict["level"], "#6B7585")
-        lv_bg = {"green":"rgba(34,197,94,.1)","orange":"rgba(249,115,22,.1)","red":"rgba(255,49,49,.1)"}.get(sent_verdict["level"], "rgba(107,117,133,.1)")
+        lv_color = {"green": "#22C55E", "orange": "#F97316", "red": "#FF3131"}.get(sent_verdict["level"], "#6B7585")
+        lv_bg = {"green": "rgba(34,197,94,.1)", "orange": "rgba(249,115,22,.1)", "red": "rgba(255,49,49,.1)"}.get(sent_verdict["level"], "rgba(107,117,133,.1)")
         st.markdown(f'<div style="background:{lv_bg};border-left:4px solid {lv_color};border-radius:8px;padding:.8rem 1rem;margin:.5rem 0;">'
                     f'<b>Santé du secteur :</b> {sent_verdict["emoji"]} {sent_verdict["message"]}<br>'
                     f'<span style="font-size:.82rem;">{sent_verdict["detail"]}</span><br>'
@@ -2478,7 +2655,8 @@ class StreamlitUI:
         # World
         st.markdown("#### 🌍 World (NVIDIA, Apple, Alphabet, Microsoft, Amazon)")
         world_stocks = [
-            ("NVIDIA", "NVDA"), ("Apple", "AAPL"), ("Alphabet A", "GOOGL"), ("Alphabet C", "GOOG"), ("Microsoft", "MSFT"), ("Amazon", "AMZN")
+            ("NVIDIA", "NVDA"), ("Apple", "AAPL"), ("Alphabet A", "GOOGL"),
+            ("Alphabet C", "GOOG"), ("Microsoft", "MSFT"), ("Amazon", "AMZN")
         ]
         world_rows = []
         for name, tk in world_stocks:
@@ -2487,22 +2665,44 @@ class StreamlitUI:
             var = None
             if info and info["prix"] and info.get("sma20"):
                 var = ((info["prix"] - info["sma20"]) / info["sma20"]) * 100
-            world_rows.append({"Action": name, "Dernier cours (€)": f"{prix:.2f}" if prix else "N/A", "Variation vs SMA20": f"{self._sign(var)}{var:.2f}%" if var is not None else "N/A"})
+            world_rows.append({
+                "Action": name,
+                "Dernier cours (€)": f"{prix:.2f}" if prix else "N/A",
+                "Variation vs SMA20": f"{self._sign(var)}{var:.2f}%" if var is not None else "N/A"
+            })
         st.dataframe(pd.DataFrame(world_rows), use_container_width=True, hide_index=True)
-        # Asia
-        st.markdown("#### 🌏 Asia (TSMC, Samsung, SK Hynix, Tencent)")
-        asia_stocks = [
-            ("TSMC", "TSM"), ("Samsung", "005930.KS"), ("SK Hynix", "000660.KS"), ("Tencent", "TCEHY")
-        ]
-        asia_rows = []
-        for name, tk in asia_stocks:
+        # Korea
+        st.markdown("#### 🇰🇷 Korea (Samsung, SK Hynix)")
+        korea_stocks = [("Samsung", "005930.KS"), ("SK Hynix", "000660.KS")]
+        korea_rows = []
+        for name, tk in korea_stocks:
             info = self.dm.analyze_ticker(tk)
             prix = info["prix"] if info else None
             var = None
             if info and info["prix"] and info.get("sma20"):
                 var = ((info["prix"] - info["sma20"]) / info["sma20"]) * 100
-            asia_rows.append({"Action": name, "Dernier cours": f"{prix:.2f}" if prix else "N/A", "Variation vs SMA20": f"{self._sign(var)}{var:.2f}%" if var is not None else "N/A"})
-        st.dataframe(pd.DataFrame(asia_rows), use_container_width=True, hide_index=True)
+            korea_rows.append({
+                "Action": name,
+                "Dernier cours": f"{prix:.2f}" if prix else "N/A",
+                "Variation vs SMA20": f"{self._sign(var)}{var:.2f}%" if var is not None else "N/A"
+            })
+        st.dataframe(pd.DataFrame(korea_rows), use_container_width=True, hide_index=True)
+        # Semiconductors
+        st.markdown("#### 🔬 Semiconductors (TSMC, NVIDIA, AMD, Intel)")
+        chip_stocks = [("TSMC", "TSM"), ("NVIDIA", "NVDA"), ("AMD", "AMD"), ("Intel", "INTC")]
+        chip_rows = []
+        for name, tk in chip_stocks:
+            info = self.dm.analyze_ticker(tk)
+            prix = info["prix"] if info else None
+            var = None
+            if info and info["prix"] and info.get("sma20"):
+                var = ((info["prix"] - info["sma20"]) / info["sma20"]) * 100
+            chip_rows.append({
+                "Action": name,
+                "Dernier cours (€)": f"{prix:.2f}" if prix else "N/A",
+                "Variation vs SMA20": f"{self._sign(var)}{var:.2f}%" if var is not None else "N/A"
+            })
+        st.dataframe(pd.DataFrame(chip_rows), use_container_width=True, hide_index=True)
 
         # Sentinelles générales
         s_msg, s_col, sent_rows = self.pe.evaluate_sentinelles()
@@ -2511,46 +2711,52 @@ class StreamlitUI:
             st.markdown('<div class="card card-blue">', unsafe_allow_html=True)
             st.markdown("### 📡 Indicateurs avancés sectoriels")
             st.caption("Sentinelles : sous SMA20 = alerte.")
-            if "OK" in s_msg: st.success(s_msg)
-            else: st.warning(s_msg)
+            if "OK" in s_msg:
+                st.success(s_msg)
+            else:
+                st.warning(s_msg)
             st.dataframe(pd.DataFrame(sent_rows), use_container_width=True, hide_index=True)
             st.markdown("---")
-            st.markdown("#### ⚖️ Poids EM Asia actuel")
+            st.markdown("#### ⚖️ Poids Satellites actuel (Korea + Semiconductors)")
             vt = ptf["valeur_totale"]
-            em_v = next((p["valeur"] for p in ptf["positions"] if p["nom"]=="EM Asia"), 0)
-            em_pct = em_v / vt * 100 if vt else 0
-            delta_ps = em_pct - 20  # cible 20%
-            st.metric("EM Asia", f"{em_pct:.1f}%", delta=f"{self._sign(delta_ps)}{delta_ps:.1f}% vs objectif 20%")
-            bc = "#FF3131" if em_pct > 28 else "#22C55E"
-            st.markdown(f'<div style="background:#1C1F26;border-radius:6px;height:8px;"><div style="background:{bc};width:{min(em_pct,100):.1f}%;height:8px;border-radius:6px;"></div></div>', unsafe_allow_html=True)
+            krw_v = next((p["valeur"] for p in ptf["positions"] if p["nom"] == "MSCI Korea"), 0)
+            chip_v = next((p["valeur"] for p in ptf["positions"] if p["nom"] == "MSCI Semiconductors"), 0)
+            poids_sat = (krw_v + chip_v) / vt * 100 if vt else 0
+            delta_ps = poids_sat - 29.3  # cible 15.5+13.8 = 29.3%
+            st.metric("Korea + Semiconductors", f"{poids_sat:.1f}%", delta=f"{self._sign(delta_ps)}{delta_ps:.1f}% vs objectif 29.3%")
+            bc = "#FF3131" if poids_sat > 35 else "#22C55E"
+            st.markdown(f'<div style="background:#1C1F26;border-radius:6px;height:8px;"><div style="background:{bc};width:{min(poids_sat,100):.1f}%;height:8px;border-radius:6px;"></div></div>', unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
 
-            # Logique d'arbitrage automatique pour EM Asia
+            # Logique d'arbitrage automatique
             if vt > 0:
-                em_alert = em_pct > 28
-                if em_alert:
-                    excess_em = (em_pct - 20) / 100 * vt
+                sat_alert = poids_sat > 35
+                if sat_alert:
+                    excess = (poids_sat - 29.3) / 100 * vt
                     st.markdown(f'<div class="arb-sell" style="margin-top:1rem;">'
-                                f'<b>🔴 Alerte : EM Asia dépasse 28% de l\'allocation</b><br>'
-                                f'Montant excédentaire : {excess_em:,.0f}€ ({(em_pct-20):.1f}% du portefeuille)<br>'
-                                f'💡 <b>Action suggérée</b> : Vendre une partie de EM Asia pour renforcer le World (MWRD.PA).</div>', unsafe_allow_html=True)
+                                f'<b>🔴 Alerte : Satellites > 35% du portefeuille</b><br>'
+                                f'Montant excédentaire : {excess:,.0f}€ ({(poids_sat-29.3):.1f}% du portefeuille)<br>'
+                                f'💡 <b>Action suggérée</b> : Réduire les satellites pour renforcer le World.</div>', unsafe_allow_html=True)
                 else:
-                    st.markdown('<div class="arb-neutral">✅ Poids EM Asia dans la limite (≤28%).</div>', unsafe_allow_html=True)
+                    st.markdown('<div class="arb-neutral">✅ Poids satellites dans la limite (≤35%).</div>', unsafe_allow_html=True)
 
         with col_m:
             st.markdown('<div class="card card-gold">', unsafe_allow_html=True)
             st.markdown("### 🌍 Indicateurs Macro <span class='live-badge'>LIVE</span>", unsafe_allow_html=True)
             st.caption("Contexte économique mondial.")
-            FMT = {"NQ=F":".2f","ES=F":".2f","^TNX":".3f","EURUSD=X":".4f","BZ=F":".2f","GC=F":".2f","DX-Y.NYB":".2f","MCHI":".2f"}
-            SFX = {"^TNX":"%","BZ=F":"$","GC=F":"$"}
+            FMT = {"NQ=F": ".2f", "ES=F": ".2f", "^TNX": ".3f", "EURUSD=X": ".4f",
+                   "BZ=F": ".2f", "GC=F": ".2f", "DX-Y.NYB": ".2f", "MCHI": ".2f"}
+            SFX = {"^TNX": "%", "BZ=F": "$", "GC=F": "$"}
             # Signaux ETF (Prix > SMA200)
             st.markdown("#### 📡 Signaux ETF (Prix > SMA200)")
-            for etf_name, etf_ticker in [("World", "MWRD.PA"), ("EM Asia", "AASI.PA")]:
+            for etf_name, etf_ticker in [("WMMS", "WMMS.XETRA"), ("MWRD World", "MWRD.PA"),
+                                         ("DCAM PEA", "DCAM.PA"), ("Korea", "KRW.PA"), ("CHIP", "CHIP.PA")]:
                 info = self.dm.analyze_ticker(etf_ticker)
                 if info and info["prix"] and info["sma200"]:
                     signal = "Favorable" if info["prix"] > info["sma200"] else "Défavorable"
                     color = "#22C55E" if signal == "Favorable" else "#FF3131"
-                    st.markdown(f"**{etf_name}** : <span style='color:{color};font-weight:bold;'>{signal}</span> (Prix {info['prix']:.2f}€ vs SMA200 {info['sma200']:.2f}€)", unsafe_allow_html=True)
+                    st.markdown(f"**{etf_name}** : <span style='color:{color};font-weight:bold;'>{signal}</span> "
+                                f"(Prix {info['prix']:.2f}€ vs SMA200 {info['sma200']:.2f}€)", unsafe_allow_html=True)
                 else:
                     st.markdown(f"**{etf_name}** : Données insuffisantes")
             st.markdown("---")
@@ -2564,16 +2770,19 @@ class StreamlitUI:
                     st.metric(lbl, "N/A")
             st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── COCKPIT DÉCISIONNEL ──
+    # ── COCKPIT DÉCISIONNEL LONG TERME ──
     def render_long_term_cockpit(self, ptf: Dict, analytics_engine: AnalyticsEngine, regime: Dict):
         st.markdown("## 📈 Cockpit Décisionnel Long Terme")
-        st.caption("Résumé rapide pour le suivi de l'allocation EM Asia.")
+        st.caption("Résumé rapide pour le suivi des allocations.")
 
-        # Récupération des métriques pour EM Asia
-        em_metrics = analytics_engine.compute_all_metrics("AASI.PA")
-        world_metrics = analytics_engine.compute_all_metrics("MWRD.PA")
+        # Récupération des métriques pour les ETF détenus
+        etf_metrics = {}
+        for pos in ptf["positions"]:
+            ticker = pos.get("ticker")
+            if ticker:
+                etf_metrics[ticker] = analytics_engine.compute_all_metrics(ticker)
 
-        # Gap vs World
+        # Gap vs World pour chaque satellite
         def relative_perf_3w(ticker):
             df = self.dm.data.get(ticker)
             world_df = None
@@ -2595,59 +2804,87 @@ class StreamlitUI:
             world_ret = (world_close.iloc[-1] / world_close.iloc[-period-1] - 1) * 100 if len(world_close) >= period+1 else 0
             return asset_ret - world_ret
 
-        em_gap = relative_perf_3w("AASI.PA")
-
-        col_g1 = st.columns(1)[0]
+        # Afficher les gaps
+        col_g1, col_g2 = st.columns(2)
         with col_g1:
-            st.markdown("#### EM Asia vs World")
-            if em_gap is not None:
-                if em_gap < 0:
-                    st.markdown(f'<div class="card card-red"><div class="kpi-label">Gap vs World (3 sem.)</div><div class="kpi-value" style="color:#FF3131;">{self._sign(em_gap)}{em_gap:.2f}%</div><div class="small">🚨 ALERTE ROUGE : sous-performance persistante</div></div>', unsafe_allow_html=True)
+            st.markdown("#### Korea vs World")
+            krw_gap = relative_perf_3w("KRW.PA")
+            if krw_gap is not None:
+                if krw_gap < 0:
+                    st.markdown(f'<div class="card card-red"><div class="kpi-label">Gap vs World (3 sem.)</div>'
+                                f'<div class="kpi-value" style="color:#FF3131;">{self._sign(krw_gap)}{krw_gap:.2f}%</div>'
+                                f'<div class="small">🚨 ALERTE ROUGE : sous-performance persistante</div></div>', unsafe_allow_html=True)
                 else:
-                    st.markdown(f'<div class="card card-green"><div class="kpi-label">Gap vs World (3 sem.)</div><div class="kpi-value" style="color:#22C55E;">{self._sign(em_gap)}{em_gap:.2f}%</div><div class="small">✅ OK, surperformance</div></div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="card card-green"><div class="kpi-label">Gap vs World (3 sem.)</div>'
+                                f'<div class="kpi-value" style="color:#22C55E;">{self._sign(krw_gap)}{krw_gap:.2f}%</div>'
+                                f'<div class="small">✅ OK, surperformance</div></div>', unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="card"><div class="kpi-label">Gap vs World (3 sem.)</div><div class="kpi-value">N/A</div></div>', unsafe_allow_html=True)
+        with col_g2:
+            st.markdown("#### Semiconductors vs World")
+            chip_gap = relative_perf_3w("CHIP.PA")
+            if chip_gap is not None:
+                if chip_gap < 0:
+                    st.markdown(f'<div class="card card-red"><div class="kpi-label">Gap vs World (3 sem.)</div>'
+                                f'<div class="kpi-value" style="color:#FF3131;">{self._sign(chip_gap)}{chip_gap:.2f}%</div>'
+                                f'<div class="small">🚨 ALERTE ROUGE : sous-performance persistante</div></div>', unsafe_allow_html=True)
+                else:
+                    st.markdown(f'<div class="card card-green"><div class="kpi-label">Gap vs World (3 sem.)</div>'
+                                f'<div class="kpi-value" style="color:#22C55E;">{self._sign(chip_gap)}{chip_gap:.2f}%</div>'
+                                f'<div class="small">✅ OK, surperformance</div></div>', unsafe_allow_html=True)
             else:
                 st.markdown('<div class="card"><div class="kpi-label">Gap vs World (3 sem.)</div><div class="kpi-value">N/A</div></div>', unsafe_allow_html=True)
 
-        # Tableau récapitulatif pour EM Asia
-        st.markdown("### 📊 Résumé analytique de EM Asia")
+        # Tableau récapitulatif pour tous les ETF
+        st.markdown("### 📊 Résumé analytique des ETF")
         data = []
-        name = "EM Asia"
-        metrics = em_metrics
-        mom6 = metrics.get("mom_6m", np.nan)
-        rel_str = metrics.get("rel_strength", np.nan)
-        vol = metrics.get("volatility", np.nan)
-        sharpe = metrics.get("sharpe", np.nan)
-        corr1m = metrics.get("corr_1m", np.nan)
-        corr3m = metrics.get("corr_3m", np.nan)
+        for pos in ptf["positions"]:
+            ticker = pos.get("ticker")
+            if not ticker or ticker not in etf_metrics:
+                continue
+            metrics = etf_metrics[ticker]
+            name = pos["nom"]
+            mom6 = metrics.get("mom_6m", np.nan)
+            rel_str = metrics.get("rel_strength", np.nan)
+            vol = metrics.get("volatility", np.nan)
+            sharpe = metrics.get("sharpe", np.nan)
+            corr1m = metrics.get("corr_1m", np.nan)
+            corr3m = metrics.get("corr_3m", np.nan)
 
-        def fmt(val, low_thresh=0, high_thresh=5, invert=False):
-            if np.isnan(val):
-                return "N/A", "gray"
-            if invert:
-                if val <= low_thresh: return f"{val:.2f}", "green"
-                elif val >= high_thresh: return f"{val:.2f}", "red"
-                else: return f"{val:.2f}", "orange"
-            else:
-                if val >= high_thresh: return f"{val:.2f}", "green"
-                elif val <= low_thresh: return f"{val:.2f}", "red"
-                else: return f"{val:.2f}", "orange"
+            def fmt(val, low_thresh=0, high_thresh=5, invert=False):
+                if np.isnan(val):
+                    return "N/A", "gray"
+                if invert:
+                    if val <= low_thresh:
+                        return f"{val:.2f}", "green"
+                    elif val >= high_thresh:
+                        return f"{val:.2f}", "red"
+                    else:
+                        return f"{val:.2f}", "orange"
+                else:
+                    if val >= high_thresh:
+                        return f"{val:.2f}", "green"
+                    elif val <= low_thresh:
+                        return f"{val:.2f}", "red"
+                    else:
+                        return f"{val:.2f}", "orange"
 
-        mom_str, mom_col = fmt(mom6, low_thresh=5, high_thresh=15)
-        rel_str2, rel_col = fmt(rel_str, low_thresh=0, high_thresh=5)
-        vol_str, vol_col = fmt(vol, low_thresh=15, high_thresh=25, invert=True)
-        sharpe_str, sharpe_col = fmt(sharpe, low_thresh=0.5, high_thresh=1.2)
-        corr1m_str, corr1m_col = fmt(corr1m, low_thresh=0.5, high_thresh=0.8)
-        corr3m_str, corr3m_col = fmt(corr3m, low_thresh=0.5, high_thresh=0.8)
+            mom_str, mom_col = fmt(mom6, low_thresh=5, high_thresh=15)
+            rel_str2, rel_col = fmt(rel_str, low_thresh=0, high_thresh=5)
+            vol_str, vol_col = fmt(vol, low_thresh=15, high_thresh=25, invert=True)
+            sharpe_str, sharpe_col = fmt(sharpe, low_thresh=0.5, high_thresh=1.2)
+            corr1m_str, corr1m_col = fmt(corr1m, low_thresh=0.5, high_thresh=0.8)
+            corr3m_str, corr3m_col = fmt(corr3m, low_thresh=0.5, high_thresh=0.8)
 
-        data.append({
-            "ETF": name,
-            "Momentum 6M": f"<span style='color:{mom_col};'>{mom_str}</span>",
-            "Force Relative vs World": f"<span style='color:{rel_col};'>{rel_str2}</span>",
-            "Volatilité (%)": f"<span style='color:{vol_col};'>{vol_str}</span>",
-            "Sharpe": f"<span style='color:{sharpe_col};'>{sharpe_str}</span>",
-            "Corrélation 1M": f"<span style='color:{corr1m_col};'>{corr1m_str}</span>",
-            "Corrélation 3M": f"<span style='color:{corr3m_col};'>{corr3m_str}</span>",
-        })
+            data.append({
+                "ETF": name,
+                "Momentum 6M": f"<span style='color:{mom_col};'>{mom_str}</span>",
+                "Force Relative vs World": f"<span style='color:{rel_col};'>{rel_str2}</span>",
+                "Volatilité (%)": f"<span style='color:{vol_col};'>{vol_str}</span>",
+                "Sharpe": f"<span style='color:{sharpe_col};'>{sharpe_str}</span>",
+                "Corrélation 1M": f"<span style='color:{corr1m_col};'>{corr1m_str}</span>",
+                "Corrélation 3M": f"<span style='color:{corr3m_col};'>{corr3m_str}</span>",
+            })
         st.markdown(pd.DataFrame(data).to_html(escape=False, index=False), unsafe_allow_html=True)
         st.caption("Légende : 🟢 OK (vert) / 🟠 À surveiller (orange) / 🔴 Dégradé (rouge).")
 
@@ -2660,32 +2897,42 @@ class StreamlitUI:
         with col_pea:
             st.markdown('<div class="card card-blue"><h4>🏦 PEA</h4>', unsafe_allow_html=True)
             net, avert = net_apres_impots("PEA", val_env["PEA"], val_env["PEA"], gan_env["PEA"])
-            if avert: st.warning(avert); st.metric("Valeur brute PEA", f"{val_env['PEA']:,.2f}€")
-            else: st.metric("Net après prélèvements (17.2%)", f"{net:,.2f}€")
+            if avert:
+                st.warning(avert)
+                st.metric("Valeur brute PEA", f"{val_env['PEA']:,.2f}€")
+            else:
+                st.metric("Net après prélèvements (17.2%)", f"{net:,.2f}€")
             st.caption(f"Gain latent PEA : {self._sign(gan_env['PEA'])}{gan_env['PEA']:,.2f}€")
             st.markdown('</div>', unsafe_allow_html=True)
         with col_av:
             st.markdown('<div class="card card-blue"><h4>🛡️ Assurance-Vie</h4>', unsafe_allow_html=True)
             net, avert = net_apres_impots("AV", val_env["AV"], val_env["AV"], gan_env["AV"])
-            if avert: st.warning(avert); st.metric("Valeur brute AV", f"{val_env['AV']:,.2f}€")
-            else: st.metric("Net après fiscalité AV", f"{net:,.2f}€")
+            if avert:
+                st.warning(avert)
+                st.metric("Valeur brute AV", f"{val_env['AV']:,.2f}€")
+            else:
+                st.metric("Net après fiscalité AV", f"{net:,.2f}€")
             st.caption(f"Gain latent AV : {self._sign(gan_env['AV'])}{gan_env['AV']:,.2f}€")
             st.markdown('</div>', unsafe_allow_html=True)
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.markdown("### 💸 Simulez un retrait partiel")
         sc1, sc2 = st.columns([2, 1])
-        with sc2: env_sim = st.selectbox("Enveloppe", ["AV", "PEA"])
+        with sc2:
+            env_sim = st.selectbox("Enveloppe", ["AV", "PEA"])
         with sc1:
             max_val = float(max(val_env.get(env_sim, 0), 1000))
             montant_sim = st.slider("Montant à retirer (€)", 0.0, max_val, min(1000.0, max_val), step=100.0)
         net_sim, avert_sim = net_apres_impots(env_sim, montant_sim, val_env.get(env_sim, 0), gan_env.get(env_sim, 0))
-        if avert_sim: st.warning(avert_sim)
+        if avert_sim:
+            st.warning(avert_sim)
         elif montant_sim > 0:
             vp, gp = val_env.get(env_sim, 0), gan_env.get(env_sim, 0)
             gain_sim = montant_sim * (gp / vp if vp else 0)
             imp_sim = montant_sim - net_sim
-            st.markdown(f'<div class="net-box" style="display:flex;gap:2.5rem;flex-wrap:wrap;"><div><div class="kpi-label">Vous retirez</div><div class="kpi-value">{montant_sim:,.2f}€</div></div>'
-                        f'<div style="color:#6B7585;">→</div><div><div class="kpi-label">Part gains imposables</div><div class="kpi-value" style="color:#D4AF37;">{gain_sim:,.2f}€</div></div>'
+            st.markdown(f'<div class="net-box" style="display:flex;gap:2.5rem;flex-wrap:wrap;">'
+                        f'<div><div class="kpi-label">Vous retirez</div><div class="kpi-value">{montant_sim:,.2f}€</div></div>'
+                        f'<div style="color:#6B7585;">→</div>'
+                        f'<div><div class="kpi-label">Part gains imposables</div><div class="kpi-value" style="color:#D4AF37;">{gain_sim:,.2f}€</div></div>'
                         f'<div><div class="kpi-label">Impôts / PS</div><div class="kpi-value" style="color:#FF3131;">{imp_sim:,.2f}€</div></div>'
                         f'<div><div class="kpi-label">Vous recevez</div><div class="kpi-value" style="color:#22C55E;">{net_sim:,.2f}€</div></div></div>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
@@ -2696,25 +2943,31 @@ class StreamlitUI:
         st.caption("Enregistrez vos ordres BUY/SELL. Le moteur reconstruit automatiquement le portefeuille.")
         with st.expander("➕ Enregistrer un nouvel ordre", expanded=True):
             c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 2, 1])
-            with c1: tx_type = st.selectbox("Type", ["BUY", "SELL"], key="tx_type")
+            with c1:
+                tx_type = st.selectbox("Type", ["BUY", "SELL"], key="tx_type")
             with c2:
                 etf_options = {f"{ticker} - {meta['nom']}": ticker for ticker, meta in ETF_LIBRARY.items()}
                 selected_display = st.selectbox("Actif", list(etf_options.keys()), key="tx_ticker")
                 tx_ticker = etf_options[selected_display]
-            with c3: tx_parts = st.number_input("Parts", min_value=0.0, value=0.0, format="%.4f", step=0.0001, key="tx_parts")
+            with c3:
+                tx_parts = st.number_input("Parts", min_value=0.0, value=0.0, format="%.4f", step=0.0001, key="tx_parts")
             with c4:
                 meta_sel = ETF_LIBRARY.get(tx_ticker, {})
                 live_px = self.dm.live.get(meta_sel.get("yf", ""), {}).get("prix")
                 default_p = float(live_px) if live_px else 0.0
                 tx_price = st.number_input("Prix unitaire (€)", min_value=0.0, value=default_p, format="%.4f", step=0.01, key="tx_price")
-            with c5: tx_date = st.date_input("Date", value=datetime.now().date(), key="tx_date")
+            with c5:
+                tx_date = st.date_input("Date", value=datetime.now().date(), key="tx_date")
             tx_note = st.text_input("Note (optionnel)", key="tx_note", placeholder="ex: DCA mensuel")
             col_btn, col_info = st.columns([1, 3])
             with col_btn:
                 if st.button("✅ Enregistrer l'ordre", type="primary", use_container_width=True):
                     if tx_parts > 0 and tx_price > 0:
-                        tx_record = {"date": str(tx_date), "type": tx_type, "ticker": tx_ticker, "parts": tx_parts,
-                                     "price": tx_price, "montant": round(tx_parts * tx_price, 2), "note": tx_note}
+                        tx_record = {
+                            "date": str(tx_date), "type": tx_type, "ticker": tx_ticker,
+                            "parts": tx_parts, "price": tx_price,
+                            "montant": round(tx_parts * tx_price, 2), "note": tx_note
+                        }
                         ok = self.te.save_transaction(tx_record)
                         if ok:
                             rebuilt = self.te.get_portfolio_as_positions()
@@ -2740,22 +2993,29 @@ class StreamlitUI:
             return
         st.markdown("### 📋 Historique complet")
         rows = []
-        for tx in sorted(txs, key=lambda x: x.get("date",""), reverse=True):
-            meta_t = ETF_LIBRARY.get(tx.get("ticker",""), {})
-            rows.append({"Date": tx.get("date",""), "Type": tx.get("type",""), "ETF": meta_t.get("nom", tx.get("ticker","")),
-                         "Parts": f"{tx.get('parts',0):.4f}", "Prix": f"{tx.get('price',0):.4f}€",
-                         "Montant": f"{tx.get('montant',0):,.2f}€", "Note": tx.get("note","")})
+        for tx in sorted(txs, key=lambda x: x.get("date", ""), reverse=True):
+            meta_t = ETF_LIBRARY.get(tx.get("ticker", ""), {})
+            rows.append({
+                "Date": tx.get("date", ""), "Type": tx.get("type", ""),
+                "ETF": meta_t.get("nom", tx.get("ticker", "")),
+                "Parts": f"{tx.get('parts', 0):.4f}", "Prix": f"{tx.get('price', 0):.4f}€",
+                "Montant": f"{tx.get('montant', 0):,.2f}€", "Note": tx.get("note", "")
+            })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         st.markdown("### 📊 Positions reconstruites (TransactionEngine)")
         rebuilt = self.te.rebuild_portfolio_at_date()
         if rebuilt:
             r_rows = []
             for tk_id, data in rebuilt.items():
-                if data["parts"] <= 0: continue
+                if data["parts"] <= 0:
+                    continue
                 prm = data["total_cost"] / data["parts"] if data["parts"] > 0 else 0
                 meta = ETF_LIBRARY.get(tk_id, {})
-                r_rows.append({"Ticker": tk_id, "Nom": meta.get("nom", tk_id), "Parts": f"{data['parts']:.4f}",
-                               "PRMin (€)": f"{prm:.4f}", "Investi (€)": f"{data['total_cost']:,.2f}", "Enveloppe": meta.get("enveloppe","?")})
+                r_rows.append({
+                    "Ticker": tk_id, "Nom": meta.get("nom", tk_id),
+                    "Parts": f"{data['parts']:.4f}", "PRMin (€)": f"{prm:.4f}",
+                    "Investi (€)": f"{data['total_cost']:,.2f}", "Enveloppe": meta.get("enveloppe", "?")
+                })
             st.dataframe(pd.DataFrame(r_rows), use_container_width=True, hide_index=True)
         if st.button("🔄 Synchroniser → portfolio_positions.json", type="secondary"):
             new_pos = self.te.get_portfolio_as_positions()
@@ -2784,15 +3044,15 @@ class StreamlitUI:
                     "Catégorie": meta.get("category", ""),
                     "Thème": meta.get("theme", ""),
                     "Score": res["score"],
-                    "Momentum 6M": f"{res['metrics'].get('mom_6m',0):.1f}%",
-                    "Force Relative": f"{res['metrics'].get('rel_strength',0):.1f}%",
-                    "Volatilité": f"{res['metrics'].get('volatility',0):.1f}%",
-                    "Sharpe": f"{res['metrics'].get('sharpe',0):.2f}",
-                    "Drawdown": f"{res['metrics'].get('max_drawdown_1y',0):.1f}%",
-                    "Corr 1M": f"{res['metrics'].get('corr_1m',0):.2f}" if res['metrics'].get('corr_1m') is not None else "N/A",
-                    "Corr 3M": f"{res['metrics'].get('corr_3m',0):.2f}" if res['metrics'].get('corr_3m') is not None else "N/A",
-                    "Corr 6M": f"{res['metrics'].get('corr_6m',0):.2f}" if res['metrics'].get('corr_6m') is not None else "N/A",
-                    "Corr 1Y": f"{res['metrics'].get('corr_1y',0):.2f}" if res['metrics'].get('corr_1y') is not None else "N/A",
+                    "Momentum 6M": f"{res['metrics'].get('mom_6m', 0):.1f}%",
+                    "Force Relative": f"{res['metrics'].get('rel_strength', 0):.1f}%",
+                    "Volatilité": f"{res['metrics'].get('volatility', 0):.1f}%",
+                    "Sharpe": f"{res['metrics'].get('sharpe', 0):.2f}",
+                    "Drawdown": f"{res['metrics'].get('max_drawdown_1y', 0):.1f}%",
+                    "Corr 1M": f"{res['metrics'].get('corr_1m', 0):.2f}" if res['metrics'].get('corr_1m') is not None else "N/A",
+                    "Corr 3M": f"{res['metrics'].get('corr_3m', 0):.2f}" if res['metrics'].get('corr_3m') is not None else "N/A",
+                    "Corr 6M": f"{res['metrics'].get('corr_6m', 0):.2f}" if res['metrics'].get('corr_6m') is not None else "N/A",
+                    "Corr 1Y": f"{res['metrics'].get('corr_1y', 0):.2f}" if res['metrics'].get('corr_1y') is not None else "N/A",
                 })
             df_scores = pd.DataFrame(scores).sort_values("Score", ascending=False)
         top_n = st.slider("Nombre d'ETFs à afficher", min_value=5, max_value=len(df_scores), value=15, step=5)
@@ -2803,25 +3063,36 @@ class StreamlitUI:
     # ── POSITION SIZING MODELER ──
     def render_position_sizing(self, ptf: Dict, regime_label: str):
         st.markdown("### ⚖️ Position Sizing Modeler")
-        st.caption("Poids cibles optimaux suggérés (Core / Satellite) en fonction du régime macro.")
+        st.caption("Poids cibles optimaux suggérés en fonction du régime macro.")
         total_val = ptf["valeur_totale"]
         if total_val <= 0:
             st.warning("Portefeuille vide.")
             return
         regime_factor = 1.0
-        if regime_label in ("Stress", "Contraction"): regime_factor = 0.6
-        elif regime_label == "Neutre": regime_factor = 0.8
+        if regime_label in ("Stress", "Contraction"):
+            regime_factor = 0.6
+        elif regime_label == "Neutre":
+            regime_factor = 0.8
         suggestions = []
         for pos in ptf["positions"]:
             ticker = pos.get("ticker")
-            if not ticker: continue
+            if not ticker:
+                continue
             meta = next((m for m in ETF_LIBRARY.values() if m["yf"] == ticker), None)
-            if not meta: continue
+            if not meta:
+                continue
             cat = meta.get("category", "Satellite")
-            if pos["nom"] == "MSCI World AV":
-                base_target = 0.80
-            elif pos["nom"] == "EM Asia":
-                base_target = 0.20
+            # Cibles spécifiques
+            if pos["nom"] == "Amundi MSCI World IMI Value Screened":
+                base_target = 0.37
+            elif pos["nom"] == "MSCI World PEA":
+                base_target = 0.183
+            elif pos["nom"] == "MSCI World AV":
+                base_target = 0.154
+            elif pos["nom"] == "MSCI Korea":
+                base_target = 0.155
+            elif pos["nom"] == "MSCI Semiconductors":
+                base_target = 0.138
             else:
                 base_target = 0.05
             adjusted = base_target * regime_factor
@@ -2841,7 +3112,7 @@ class StreamlitUI:
     def render_arbitrage_widget(self):
         if "positions" not in st.session_state:
             return
-        holdings = [p.get("_tk_id", p.get("ticker")) for p in st.session_state["positions"] if p.get("valeur",0) > 0]
+        holdings = [p.get("_tk_id", p.get("ticker")) for p in st.session_state["positions"] if p.get("valeur", 0) > 0]
         holdings = list(dict.fromkeys([h for h in holdings if h in ETF_LIBRARY]))
         opps = self.signal.get_arbitrage_opportunities(holdings)
         if opps:
@@ -2851,7 +3122,7 @@ class StreamlitUI:
                             f'Vendre <b>{opp["sell_name"]}</b> (score actuel) → Acheter <b>{opp["buy_name"]}</b><br>'
                             f'Gain potentiel estimé : +{opp["gain_potential"]} points de score</div>', unsafe_allow_html=True)
         else:
-            st.markdown('<div class="arb-neutral">✅ Aucune opportunité d’arbitrage significative détectée.</div>', unsafe_allow_html=True)
+            st.markdown('<div class="arb-neutral">✅ Aucune opportunité d\'arbitrage significative détectée.</div>', unsafe_allow_html=True)
 
     # ── FOOTER ──
     def render_footer(self, mode_direct: bool, capital: float, score_em: int, regime_label: str, live_ok: int, live_total: int):
@@ -2861,7 +3132,7 @@ class StreamlitUI:
             s = self._sign
             mode_txt = "🔌 MODE DIRECT" if mode_direct else "Ajust. patrimonial actif"
             persist = "GitHub Gist + SQLite" if self.pm.status == "github" else "SQLite local"
-            st.caption(f"◈ Cockpit v5.8 Allocation Long Terme · {mode_txt} · Score EM={s(score_em)}{score_em}/4 · "
+            st.caption(f"◈ Cockpit v5.9 Multi-ETF · {mode_txt} · "
                        f"Régime : {regime_label} · Capital {capital:,.2f}€ · Persistance : {persist} · {live_ok}/{live_total} prix live · "
                        f"Benchmark : MWR Cash-Flow Adjusted · Outil personnel --- Ne constitue pas un conseil en investissement")
         with col_f2:
@@ -2869,12 +3140,14 @@ class StreamlitUI:
                 st.cache_data.clear()
                 st.rerun()
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MODULE 16 : MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _load_config() -> Dict:
-    defaults = {"capital_reel": _DEFAULT_CAPITAL_REEL, "ajustement_pat": _DEFAULT_AJUSTEMENT_PAT, "bonus_fortuneo": _DEFAULT_BONUS_FORTUNEO}
+    defaults = {"capital_reel": _DEFAULT_CAPITAL_REEL, "ajustement_pat": _DEFAULT_AJUSTEMENT_PAT,
+                "bonus_fortuneo": _DEFAULT_BONUS_FORTUNEO}
     try:
         if os.path.exists(_CONFIG_PATH):
             with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -2935,20 +3208,26 @@ def main():
 
     with st.spinner("⚙️ Calcul des indicateurs..."):
         ptf = pe.compute_portfolio(positions_conf, capital_reel, ajustement_pat, bonus_fortuneo)
-        for i, pos_calc in enumerate(ptf["positions"]):
-            conf_pos = next((p for p in positions_conf if p["nom"] == pos_calc["nom"]), None)
-            if conf_pos:
-                pos_calc["parts"] = conf_pos["parts"]
-                pos_calc["prm"] = conf_pos["prm"]
-                pos_calc["gain_unit"] = pos_calc["prix"] - conf_pos["prm"] if pos_calc["prix"] else 0
+        # Les positions contiennent déjà parts, prm et gain_unit
         bench = pe.compute_benchmark(positions_conf, ptf["perf_tot_pct"])
         regime = mre.get_full_regime()
-        em_info = dm.analyze_ticker("AASI.PA")
-        em_msg, em_col = pe.evaluate_em_asia(em_info)
-        unified_em = pe.compute_unified_score("AASI.PA")
-        target_em = pe.compute_target_weight("EM Asia", "AASI.PA", ptf["valeur_totale"], ptf["positions"])
+        # Récupérer les analyses pour les ETF détenus
+        etf_analyses = {}
+        for pos in positions_conf:
+            ticker = pos.get("ticker")
+            if ticker:
+                info = dm.analyze_ticker(ticker)
+                etf_analyses[ticker] = info
+        # Calcul des scores pour les ETF
+        unified_scores = {}
+        target_weights = {}
+        for pos in positions_conf:
+            ticker = pos.get("ticker")
+            if ticker:
+                unified_scores[ticker] = pe.compute_unified_score(ticker)
+                target_weights[ticker] = pe.compute_target_weight(pos["nom"], ticker, ptf["valeur_totale"], ptf["positions"])
         ld_alerts = pe.check_leadership_alerts()
-        phase_text, phase_color = pe.determine_phase(bench.get("gap"), em_info)
+        phase_text, phase_color = pe.determine_phase(bench.get("gap"), etf_analyses)
         _, _, sent_rows = pe.evaluate_sentinelles()
         live_ok = sum(1 for v in dm.live.values() if v.get("prix"))
         live_total = len(dm.live)
@@ -2961,29 +3240,58 @@ def main():
         for al in ld_alerts:
             gv, nom_al, sp, wp = al["gap"], al["nom"], al["sat_perf"], al["world_perf"]
             s = StreamlitUI._sign
-            if gv < -5: cls, ico = "alert-critical", "🚨"
-            elif gv < -2: cls, ico = "alert-leadership", "⚠️"
-            else: continue
+            if gv < -5:
+                cls, ico = "alert-critical", "🚨"
+            elif gv < -2:
+                cls, ico = "alert-leadership", "⚠️"
+            else:
+                continue
             st.markdown(f'<div class="{cls}">{ico} <b>ALERTE : {nom_al}</b> --- {abs(gv):.1f}% en retard sur le World sur 14 jours '
                         f'({nom_al} : {s(sp)}{sp:.1f}% | World : {s(wp)}{wp:.1f}%)<br>'
                         f'<span style="font-size:.85rem;">→ Vérifiez la section Leadership ci-dessous.</span></div>', unsafe_allow_html=True)
         st.markdown(f'<div class="phase-banner" style="background:{phase_color};color:white;">{phase_text}</div>', unsafe_allow_html=True)
         ui.render_command_center(ptf, bench, mode_direct, pm)
-        ui.render_equity_curve_section(ptf, regime, unified_em, positions_conf)
+        ui.render_equity_curve_section(ptf, regime, positions_conf)
         ui.render_risk_dashboard(ptf)
-        st.markdown("## 🧠 Analyse de l'ETF Satellite")
-        em_border = "#22C55E" if em_col=="green" else "#F97316" if em_col=="orange" else "#FF3131"
-        st.markdown(f'<div class="card" style="border-left:4px solid {em_border};margin-bottom:.5rem;">'
-                    f'<b>🌏 EM Asia (AASI.PA) --- Alerte décisionnelle</b><br>{em_msg}</div>', unsafe_allow_html=True)
-        with st.container():
-            st.markdown("### 🌏 EM Asia (AASI.PA)")
-            ui.render_satellite_card_pedagogic("EM Asia", "AASI.PA", unified_em, target_em, regime, sent_rows, "em_asia")
+        st.markdown("## 🧠 Analyse des ETF Satellites")
+
+        # Korea
+        krw_pos = next((p for p in positions_conf if p["ticker"] == "KRW.PA"), None)
+        if krw_pos:
+            ticker = "KRW.PA"
+            krw_unified = unified_scores.get(ticker, {})
+            krw_target = target_weights.get(ticker, {})
+            krw_info = etf_analyses.get(ticker)
+            if krw_info:
+                border = "#22C55E" if (krw_info.get("sma20") and krw_info.get("prix") and krw_info["prix"] > krw_info["sma20"]) else "#F97316"
+                st.markdown(f'<div class="card" style="border-left:4px solid {border};margin-bottom:.5rem;">'
+                            f'<b>🇰🇷 MSCI Korea (KRW.PA)</b></div>', unsafe_allow_html=True)
+                with st.container():
+                    st.markdown("### 🇰🇷 MSCI Korea (KRW.PA)")
+                    ui.render_satellite_card_pedagogic("MSCI Korea", "KRW.PA", krw_unified, krw_target, regime, sent_rows, "korea")
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # Semiconductors
+        chip_pos = next((p for p in positions_conf if p["ticker"] == "CHIP.PA"), None)
+        if chip_pos:
+            ticker = "CHIP.PA"
+            chip_unified = unified_scores.get(ticker, {})
+            chip_target = target_weights.get(ticker, {})
+            chip_info = etf_analyses.get(ticker)
+            if chip_info:
+                border = "#22C55E" if (chip_info.get("sma20") and chip_info.get("prix") and chip_info["prix"] > chip_info["sma20"]) else "#A855F7"
+                st.markdown(f'<div class="card" style="border-left:4px solid {border};margin-bottom:.5rem;">'
+                            f'<b>🔬 MSCI Semiconductors (CHIP.PA)</b></div>', unsafe_allow_html=True)
+                with st.container():
+                    st.markdown("### 🔬 MSCI Semiconductors (CHIP.PA)")
+                    ui.render_satellite_card_pedagogic("MSCI Semiconductors", "CHIP.PA", chip_unified, chip_target, regime, sent_rows, "chip")
+
         ui.render_sentinelles_macro(ptf)
         ui.render_long_term_cockpit(ptf, AnalyticsEngine(dm), regime)
         ui.render_fiscal_simulator(ptf)
         ui.render_position_sizing(ptf, regime["confirmed_label"])
         ui.render_arbitrage_widget()
-        ui.render_footer(mode_direct, capital_reel, unified_em["total"], regime["confirmed_label"], live_ok, live_total)
+        ui.render_footer(mode_direct, capital_reel, 0, regime["confirmed_label"], live_ok, live_total)
 
     with tab_transactions:
         ui.render_transactions_tab()
