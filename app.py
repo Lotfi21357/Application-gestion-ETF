@@ -168,6 +168,9 @@ ETF_LIBRARY: Dict[str, Dict] = {
     "AUEM.PA": {"nom": "MSCI EM USD", "name": "Amundi ETF MSCI Emerging Markets USD", "yf": "AUEM.PA", "yf_fallbacks": [], "category": "Emerging", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
 }
 
+# Ajout des tickers pour les actions World (afin d'éviter les N/A)
+WORLD_STOCKS_TICKERS = ["NVDA", "AAPL", "GOOGL", "GOOG", "MSFT", "AMZN"]
+
 GOLD_TICKERS_FALLBACK = []
 WORLD_TICKERS = ["WMMS.DE", "WMMS.XETRA", "MWRD.PA", "IWDA.AS", "EUNL.DE", "DCAM.PA"]
 PROXIES_KR = ["005930.KS", "000660.KS"]
@@ -246,6 +249,7 @@ def _collect_all_yf_tickers() -> List[str]:
     tickers.extend(REGIME_TICKERS)
     tickers.extend(PROXIES_KR)
     tickers.extend(PROXIES_CHIP)
+    tickers.extend(WORLD_STOCKS_TICKERS)  # <-- AJOUT pour éviter les N/A
     for tlist in SENTINELLES.values():
         tickers.extend(tlist)
     return list(dict.fromkeys(tickers))
@@ -1407,7 +1411,6 @@ class PortfolioEngine:
         if gap < 0:
             return "📉 Phase 1 : Reconquête --- Revenir à l'équilibre vs World AV", "#7F1D1D"
         signals = []
-        # etf_infos peut être None, on le sécurise
         safe_infos = etf_infos or {}
         for ticker, info in safe_infos.items():
             if info and info.get("sma20") and info.get("prix") and info["prix"] < info["sma20"]:
@@ -1488,7 +1491,7 @@ class PortfolioEngine:
             return weighted_cagr, any_fallback
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 11 : QUANT ALERT ENGINE
+# MODULE 11 : QUANT ALERT ENGINE (version corrigée avec probabilités renforcées)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class QuantAlertEngine:
@@ -1543,28 +1546,30 @@ class QuantAlertEngine:
         vol_ratio = indicators.get("vol_ratio", 1.0)
         vix_ratio = indicators.get("vix_ratio", 1.0)
 
+        # PONDÉRATIONS AUGMENTÉES pour rendre les signaux plus réactifs
         score = 0.0
         if rsi > 70:
-            score += (rsi - 70) / 30 * 0.3
+            score += (rsi - 70) / 30 * 0.6       # au lieu de 0.3
         elif rsi < 30:
-            score -= (30 - rsi) / 30 * 0.2
+            score += (30 - rsi) / 30 * 0.4       # au lieu de 0.2
         if macd < 0:
-            score += min(-macd / 5, 0.3)
+            score += min(-macd / 5, 0.6)          # au lieu de 0.3
         if dist20 < -2:
-            score += min(abs(dist20) / 10, 0.25)
+            score += min(abs(dist20) / 10, 0.5)    # au lieu de 0.25
         if dist50 < -3:
-            score += min(abs(dist50) / 15, 0.25)
+            score += min(abs(dist50) / 15, 0.5)    # au lieu de 0.25
         if mom5 < -1:
-            score += min(abs(mom5) / 10, 0.2)
+            score += min(abs(mom5) / 10, 0.4)      # au lieu de 0.2
         if vol_ratio > 1.2:
-            score += min((vol_ratio - 1.2) * 0.2, 0.15)
+            score += min((vol_ratio - 1.2) * 0.4, 0.3)  # au lieu de 0.2
         if vix_ratio > 1.1:
-            score += min((vix_ratio - 1.1) * 0.15, 0.1)
+            score += min((vix_ratio - 1.1) * 0.3, 0.2)  # au lieu de 0.15
 
         factor = 1.0 / horizon
         prob = min(score * factor, 0.65)
-        if prob > 0.4:
-            prob += 0.05
+        # Renforcement pour les signaux forts
+        if prob > 0.3:
+            prob += 0.1
         return max(0.0, min(1.0, prob))
 
     def compute_alert(self, ticker: str, current_price: float, position_value: float) -> Optional[Dict]:
@@ -1578,12 +1583,13 @@ class QuantAlertEngine:
 
         vol = self.dm.analyze_ticker(ticker).get("volatility", 20) if self.dm.analyze_ticker(ticker) else 20
         expected_drop = (abs(indicators.get("dist_sma20", 0)) + 0.5 * abs(indicators.get("dist_sma50", 0))) / 100.0
-        expected_drop = max(0.01, min(0.05, expected_drop))
+        expected_drop = max(0.005, min(0.05, expected_drop))  # au moins 0.5% pour éviter des EV trop faibles
 
         cost = self.COST_BPS
         ev = p1 * expected_drop - (1 - p1) * cost
 
-        ev_thresholds = [0.005, 0.010, 0.020]
+        # Seuils abaissés pour déclencher plus tôt
+        ev_thresholds = [0.001, 0.003, 0.006]   # 0.1%, 0.3%, 0.6%
         sell_pct = 0.0
         if ev > ev_thresholds[0]:
             sell_pct = 0.25
@@ -1593,6 +1599,7 @@ class QuantAlertEngine:
             sell_pct = 0.75
         sell_amount = sell_pct * position_value
 
+        # Filtre de persistance : si J+2 et J+3 ne confirment pas, on réduit la vente
         if p2 < 0.3 * p1 and p3 < 0.2 * p1:
             sell_pct = min(sell_pct, 0.25)
 
@@ -1612,7 +1619,7 @@ class QuantAlertEngine:
         }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 12 : PEDAGOGIC ENGINE
+# MODULE 12 : PEDAGOGIC ENGINE (version corrigée pour le leadership)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class PedagogicEngine:
@@ -1691,6 +1698,52 @@ class PedagogicEngine:
         return {"label": regime["confirmed_label"], "score": regime["confirmed_score"], "emoji": info["emoji"],
                 "level": info["level"], "explain": info["explain"], "action": info["action"], "conseil": info["conseil"]}
 
+    def get_weekly_performances(self, dm: DataManager, ticker_key: str, n_weeks: int = 5) -> Tuple[List[str], List[float], List[float]]:
+        """
+        Récupère les performances hebdomadaires d'un ETF par rapport au World.
+        ticker_key est la clé de la bibliothèque (ex: "WMMS.XETRA").
+        On résout automatiquement le ticker Yahoo Finance réel.
+        """
+        # Résolution du ticker yfinance
+        meta = ETF_LIBRARY.get(ticker_key, {})
+        yf_ticker = meta.get("yf", ticker_key)
+        # Fallbacks éventuels
+        sat_df = dm.data.get(yf_ticker, pd.DataFrame())
+        if sat_df.empty:
+            for fb in meta.get("yf_fallbacks", []):
+                sat_df = dm.data.get(fb, pd.DataFrame())
+                if not sat_df.empty:
+                    yf_ticker = fb
+                    break
+        if sat_df.empty:
+            return [], [], []
+
+        world_close = None
+        for wt in WORLD_TICKERS:
+            df = dm.data.get(wt, pd.DataFrame())
+            if not df.empty and "Close" in df.columns:
+                world_close = df["Close"].dropna()
+                break
+        if world_close is None:
+            return [], [], []
+
+        sat_close = sat_df["Close"].dropna()
+        common = sat_close.index.intersection(world_close.index)
+        if len(common) < 10:
+            return [], [], []
+        sat_w = sat_close[common].resample("W").last()
+        world_w = world_close[common].resample("W").last()
+        common_w = sat_w.index.intersection(world_w.index)
+        if len(common_w) < 2:
+            return [], [], []
+        sat_w = sat_w[common_w]; world_w = world_w[common_w]
+        sat_ret = sat_w.pct_change().dropna() * 100
+        world_ret = world_w.pct_change().dropna() * 100
+        n = min(n_weeks, len(sat_ret))
+        sat_ret = sat_ret.iloc[-n:]; world_ret = world_ret.iloc[-n:]
+        labels = ["En cours" if i == n-1 else f"S-{n-1-i}" for i in range(n)]
+        return labels, list(sat_ret.values), list(world_ret.values)
+
     def translate_leadership(self, nom: str, weekly_gaps: List[float]) -> Dict:
         if not weekly_gaps:
             return {"emoji": "❓", "level": "orange", "message": "Données insuffisantes.", "detail": "", "action": "Revérifiez."}
@@ -1714,33 +1767,6 @@ class PedagogicEngine:
         else:
             return {"emoji": "🟡", "level": "orange", "message": f"{nom} est à égalité avec le World.",
                     "detail": f"Performance équivalente · Moyenne : {avg:+.1f}%", "action": "Maintien raisonnable."}
-
-    def get_weekly_performances(self, dm: DataManager, ticker: str, n_weeks: int = 5) -> Tuple[List[str], List[float], List[float]]:
-        world_close = None
-        for wt in WORLD_TICKERS:
-            df = dm.data.get(wt, pd.DataFrame())
-            if not df.empty and "Close" in df.columns:
-                world_close = df["Close"].dropna()
-                break
-        sat_df = dm.data.get(ticker, pd.DataFrame())
-        if world_close is None or sat_df.empty or "Close" not in sat_df.columns:
-            return [], [], []
-        sat_close = sat_df["Close"].dropna()
-        common = sat_close.index.intersection(world_close.index)
-        if len(common) < 10:
-            return [], [], []
-        sat_w = sat_close[common].resample("W").last()
-        world_w = world_close[common].resample("W").last()
-        common_w = sat_w.index.intersection(world_w.index)
-        if len(common_w) < 2:
-            return [], [], []
-        sat_w = sat_w[common_w]; world_w = world_w[common_w]
-        sat_ret = sat_w.pct_change().dropna() * 100
-        world_ret = world_w.pct_change().dropna() * 100
-        n = min(n_weeks, len(sat_ret))
-        sat_ret = sat_ret.iloc[-n:]; world_ret = world_ret.iloc[-n:]
-        labels = ["En cours" if i == n-1 else f"S-{n-1-i}" for i in range(n)]
-        return labels, list(sat_ret.values), list(world_ret.values)
 
     def translate_simple_score(self, score_raw: int) -> Dict:
         mapping = {-4:0, -3:0, -2:1, -1:2, 0:2, 1:3, 2:3, 3:4, 4:5}
@@ -2447,13 +2473,18 @@ class StreamlitUI:
                 st.markdown(f'<div class="small">Dernier : {history["date"].iloc[-1]}</div>', unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
 
-    def render_leadership_comparison(self, nom: str, ticker: str, color_sat: str = "#D4AF37"):
+    def render_leadership_comparison(self, nom: str, ticker_key: str, color_sat: str = "#D4AF37"):
+        """
+        Affiche le graphique de leadership hebdomadaire pour un ETF donné.
+        ticker_key est la clé de la bibliothèque (ex: "WMMS.XETRA").
+        """
         st.markdown(f"### 📊 {nom} vs MSCI World --- Leadership hebdomadaire")
         with st.container():
             st.markdown('<div class="leadership-header"><div style="font-size:.8rem;color:#6B7585;">POURQUOI CE GRAPHIQUE EST IMPORTANT</div>'
                         '<div style="color:#E2E8F0;line-height:1.6;">Ce graphique compare chaque semaine la performance de votre ETF vs le MSCI World. '
                         '<b>Si l\'ETF fait régulièrement moins bien que le World</b>, il perd sa raison d\'être.</div></div>', unsafe_allow_html=True)
-        labels, sat_perfs, world_perfs = self.pde.get_weekly_performances(self.dm, ticker)
+        # Utilisation de la méthode corrigée de PedagogicEngine
+        labels, sat_perfs, world_perfs = self.pde.get_weekly_performances(self.dm, ticker_key)
         if labels and sat_perfs and world_perfs:
             col_chart, col_verdict = st.columns([2, 1])
             with col_chart:
@@ -2569,12 +2600,12 @@ class StreamlitUI:
                             f_names = ", ".join([short.get(f, f) for f in flags])
                             st.markdown(f'<div class="alert-box">🚨 <b>Trop de risque concentré</b> : {f_names} représente plus de 40% du risque total. Rééquilibrez.</div>', unsafe_allow_html=True)
 
-    def render_satellite_card_pedagogic(self, nom: str, ticker: str, unified: Dict, target_weight: Dict,
+    def render_satellite_card_pedagogic(self, nom: str, ticker_key: str, unified: Dict, target_weight: Dict,
                                         regime: Dict, sent_rows: List[Dict], sector: str, gap_vs_world: Optional[float] = None):
         """Affiche une carte pédagogique pour un ETF satellite, avec option d'écart vs World."""
         color_map = {"korea": "#F97316", "chip": "#A855F7", "value": "#D4AF37"}
         color = color_map.get(sector, "#D4AF37")
-        strat_full = self.se.compute(ticker, unified, regime)
+        strat_full = self.se.compute(ticker_key, unified, regime)
         simple_score = self.pde.translate_simple_score(unified["total"])
         st.markdown(f'<div class="card" style="border-top:3px solid {color};padding:0;overflow:hidden;">', unsafe_allow_html=True)
         c_score, c_action = st.columns([2, 3])
@@ -2602,7 +2633,8 @@ class StreamlitUI:
         st.markdown('</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="{strat_full["verdict_cls"]} verdict-card">{strat_full["verdict"]}'
                     f'<div style="font-size:.82rem;margin-top:.4rem;">💡 {simple_score["action"]}</div></div>', unsafe_allow_html=True)
-        self.render_leadership_comparison(nom, ticker, color)
+        # Appel de la méthode corrigée avec la clé de bibliothèque
+        self.render_leadership_comparison(nom, ticker_key, color)
         sent_verdict = self.pde.translate_sentinelles(sent_rows, sector)
         lv_color = {"green": "#22C55E", "orange": "#F97316", "red": "#FF3131"}.get(sent_verdict["level"], "#6B7585")
         lv_bg = {"green": "rgba(34,197,94,.1)", "orange": "rgba(249,115,22,.1)", "red": "rgba(255,49,49,.1)"}.get(sent_verdict["level"], "rgba(107,117,133,.1)")
@@ -2636,11 +2668,11 @@ class StreamlitUI:
             st.markdown(f'<div style="margin-top:.8rem;font-size:.8rem;color:#6B7585;">Régime actuel : <b>{target_weight.get("regime_label","N/A")}</b> '
                         f'(Multiplicateur × {target_weight.get("regime_mult", 1.0):.2f})</div>', unsafe_allow_html=True)
         with st.expander(f"📐 Analyse technique détaillée --- {nom}", expanded=False):
-            fig_a = plot_alpha_bars(self.dm, ticker, nom)
+            fig_a = plot_alpha_bars(self.dm, ticker_key, nom)
             if fig_a:
                 st.plotly_chart(fig_a, use_container_width=True, config={"displayModeBar": False})
                 st.caption("Chaque barre = journée où l'ETF a fait mieux (vert) ou moins bien (rouge) que le MSCI World.")
-            fig_r = plot_relative_perf(self.dm, ticker, nom)
+            fig_r = plot_relative_perf(self.dm, ticker_key, nom)
             if fig_r:
                 st.plotly_chart(fig_r, use_container_width=True, config={"displayModeBar": False})
                 st.caption("Courbe au-dessus de 0 = l'ETF surperforme le World depuis le début du suivi.")
@@ -2824,16 +2856,28 @@ class StreamlitUI:
                 st.caption("Rappel : un régime de risque élevé sans persistance+probabilité confirmées n'est PAS un signal de vente.")
 
     def render_long_term_cockpit(self, ptf: Dict, analytics_engine: AnalyticsEngine, regime: Dict):
-        st.markdown("## 📈 Cockpit Décisionnel Long Terme")
-        st.caption("Résumé rapide pour le suivi des allocations.")
+        st.markdown("## 📈 Cockpit Décisionnel Long Terme — Analyse de tous les ETF disponibles")
+        st.caption("Résumé des métriques clés pour l'ensemble des ETF de la bibliothèque (même ceux non détenus).")
+
+        # On récupère tous les tickers de la bibliothèque
+        all_tickers = list(ETF_LIBRARY.keys())
         etf_metrics = {}
-        for pos in ptf["positions"]:
-            ticker = pos.get("ticker")
-            if ticker:
+        for ticker in all_tickers:
+            # On résout le ticker Yahoo pour les données
+            meta = ETF_LIBRARY.get(ticker, {})
+            yf_ticker = meta.get("yf", ticker)
+            # On utilise les données déjà chargées
+            if yf_ticker in self.dm.data:
+                etf_metrics[ticker] = analytics_engine.compute_all_metrics(yf_ticker)
+            else:
+                # Fallback sur le ticker lui-même si non trouvé
                 etf_metrics[ticker] = analytics_engine.compute_all_metrics(ticker)
 
+        # Fonction pour calculer le gap vs World sur 3 semaines (on utilise le ticker yf)
         def relative_perf_3w(ticker):
-            df = self.dm.data.get(ticker)
+            meta = ETF_LIBRARY.get(ticker, {})
+            yf_tk = meta.get("yf", ticker)
+            df = self.dm.data.get(yf_tk)
             world_df = None
             for wt in WORLD_TICKERS:
                 world_df = self.dm.data.get(wt)
@@ -2853,50 +2897,21 @@ class StreamlitUI:
             world_ret = (world_close.iloc[-1] / world_close.iloc[-period-1] - 1) * 100 if len(world_close) >= period+1 else 0
             return asset_ret - world_ret
 
-        col_g1, col_g2 = st.columns(2)
-        with col_g1:
-            st.markdown("#### Korea vs World")
-            krw_gap = relative_perf_3w("KRW.PA")
-            if krw_gap is not None:
-                if krw_gap < 0:
-                    st.markdown(f'<div class="card card-red"><div class="kpi-label">Gap vs World (3 sem.)</div>'
-                                f'<div class="kpi-value" style="color:#FF3131;">{self._sign(krw_gap)}{krw_gap:.2f}%</div>'
-                                f'<div class="small">🚨 ALERTE ROUGE : sous-performance persistante</div></div>', unsafe_allow_html=True)
-                else:
-                    st.markdown(f'<div class="card card-green"><div class="kpi-label">Gap vs World (3 sem.)</div>'
-                                f'<div class="kpi-value" style="color:#22C55E;">{self._sign(krw_gap)}{krw_gap:.2f}%</div>'
-                                f'<div class="small">✅ OK, surperformance</div></div>', unsafe_allow_html=True)
-            else:
-                st.markdown('<div class="card"><div class="kpi-label">Gap vs World (3 sem.)</div><div class="kpi-value">N/A</div></div>', unsafe_allow_html=True)
-        with col_g2:
-            st.markdown("#### Semiconductors vs World")
-            chip_gap = relative_perf_3w("CHIP.PA")
-            if chip_gap is not None:
-                if chip_gap < 0:
-                    st.markdown(f'<div class="card card-red"><div class="kpi-label">Gap vs World (3 sem.)</div>'
-                                f'<div class="kpi-value" style="color:#FF3131;">{self._sign(chip_gap)}{chip_gap:.2f}%</div>'
-                                f'<div class="small">🚨 ALERTE ROUGE : sous-performance persistante</div></div>', unsafe_allow_html=True)
-                else:
-                    st.markdown(f'<div class="card card-green"><div class="kpi-label">Gap vs World (3 sem.)</div>'
-                                f'<div class="kpi-value" style="color:#22C55E;">{self._sign(chip_gap)}{chip_gap:.2f}%</div>'
-                                f'<div class="small">✅ OK, surperformance</div></div>', unsafe_allow_html=True)
-            else:
-                st.markdown('<div class="card"><div class="kpi-label">Gap vs World (3 sem.)</div><div class="kpi-value">N/A</div></div>', unsafe_allow_html=True)
-
-        st.markdown("### 📊 Résumé analytique des ETF")
+        # Construire le tableau pour tous les ETFs
         data = []
-        for pos in ptf["positions"]:
-            ticker = pos.get("ticker")
-            if not ticker or ticker not in etf_metrics:
+        for ticker in all_tickers:
+            meta = ETF_LIBRARY.get(ticker, {})
+            metrics = etf_metrics.get(ticker, {})
+            if not metrics:
                 continue
-            metrics = etf_metrics[ticker]
-            name = pos["nom"]
+            name = meta.get("nom", ticker)
             mom6 = metrics.get("mom_6m", np.nan)
             rel_str = metrics.get("rel_strength", np.nan)
             vol = metrics.get("volatility", np.nan)
             sharpe = metrics.get("sharpe", np.nan)
             corr1m = metrics.get("corr_1m", np.nan)
             corr3m = metrics.get("corr_3m", np.nan)
+            gap3w = relative_perf_3w(ticker)
 
             def fmt(val, low_thresh=0, high_thresh=5, invert=False):
                 if np.isnan(val):
@@ -2922,6 +2937,8 @@ class StreamlitUI:
             sharpe_str, sharpe_col = fmt(sharpe, low_thresh=0.5, high_thresh=1.2)
             corr1m_str, corr1m_col = fmt(corr1m, low_thresh=0.5, high_thresh=0.8)
             corr3m_str, corr3m_col = fmt(corr3m, low_thresh=0.5, high_thresh=0.8)
+            gap_str = f"{gap3w:+.1f}%" if gap3w is not None else "N/A"
+            gap_color = "#22C55E" if (gap3w or 0) > 0 else "#FF3131" if (gap3w or 0) < 0 else "#6B7585"
 
             data.append({
                 "ETF": name,
@@ -2931,7 +2948,9 @@ class StreamlitUI:
                 "Sharpe": f"<span style='color:{sharpe_col};'>{sharpe_str}</span>",
                 "Corrélation 1M": f"<span style='color:{corr1m_col};'>{corr1m_str}</span>",
                 "Corrélation 3M": f"<span style='color:{corr3m_col};'>{corr3m_str}</span>",
+                "Gap 3 sem. vs World": f"<span style='color:{gap_color};'>{gap_str}</span>"
             })
+
         st.markdown(pd.DataFrame(data).to_html(escape=False, index=False), unsafe_allow_html=True)
         st.caption("Légende : 🟢 OK (vert) / 🟠 À surveiller (orange) / 🔴 Dégradé (rouge).")
 
@@ -3099,7 +3118,7 @@ class StreamlitUI:
                     "Corr 1Y": f"{res['metrics'].get('corr_1y', 0):.2f}" if res['metrics'].get('corr_1y') is not None else "N/A",
                 })
             df_scores = pd.DataFrame(scores).sort_values("Score", ascending=False)
-        top_n = st.slider("Nombre d'ETFs à afficher", min_value=5, max_value=len(df_scores), value=15, step=5)
+        top_n = st.slider("Nombre d'ETFs à afficher", min_value=5, max_value=len(df_scores), value=min(20, len(df_scores)), step=5)
         st.dataframe(df_scores.head(top_n), use_container_width=True, hide_index=True)
         if st.button("📊 Afficher tous les ETFs", use_container_width=True):
             st.dataframe(df_scores, use_container_width=True, hide_index=True)
