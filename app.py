@@ -15,7 +15,7 @@
 #   • Toutes les fonctionnalités de suivi et screener conservées
 #
 # Requis (requirements.txt) :
-#   streamlit yfinance pandas numpy plotly PyGithub scipy ta requests_cache sqlalchemy tzdata
+#   streamlit yfinance pandas numpy plotly PyGithub scipy requests_cache sqlalchemy tzdata
 # =============================================================================
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1403,7 +1403,9 @@ class PortfolioEngine:
         if gap < 0:
             return "📉 Phase 1 : Reconquête --- Revenir à l'équilibre vs World AV", "#7F1D1D"
         signals = []
-        for ticker, info in etf_infos.items():
+        # etf_infos peut être None, on le sécurise
+        safe_infos = etf_infos or {}
+        for ticker, info in safe_infos.items():
             if info and info.get("sma20") and info.get("prix") and info["prix"] < info["sma20"]:
                 short_name = ETF_LIBRARY.get(ticker, {}).get("nom", ticker)[:8]
                 signals.append(f"{short_name}<SMA20")
@@ -3250,6 +3252,10 @@ def main():
             if ticker:
                 info = dm.analyze_ticker(ticker)
                 etf_analyses[ticker] = info
+        # Sécurisation : si pour une raison quelconque etf_analyses est None, on le réinitialise
+        if etf_analyses is None:
+            etf_analyses = {}
+
         unified_scores = {}
         target_weights = {}
         for pos in positions_conf:
@@ -3258,14 +3264,16 @@ def main():
                 unified_scores[ticker] = pe.compute_unified_score(ticker)
                 target_weights[ticker] = pe.compute_target_weight(pos["nom"], ticker, ptf["valeur_totale"], ptf["positions"])
         ld_alerts = pe.check_leadership_alerts()
-        phase_text, phase_color = pe.determine_phase(bench.get("gap"), etf_analyses)
+        # Passage sécurisé de etf_analyses (ou {}) à determine_phase
+        phase_text, phase_color = pe.determine_phase(bench.get("gap"), etf_analyses or {})
         _, _, sent_rows = pe.evaluate_sentinelles()
         live_ok = sum(1 for v in dm.live.values() if v.get("prix"))
         live_total = len(dm.live)
 
         # Calcul de l'écart vs World pour WMMS (World Value) par rapport à MWRD
-        wmms_price = etf_analyses.get("WMMS.XETRA", {}).get("prix")
-        mwrd_price = etf_analyses.get("MWRD.PA", {}).get("prix")
+        # Utilisation de (etf_analyses or {}) pour éviter l'erreur
+        wmms_price = (etf_analyses or {}).get("WMMS.XETRA", {}).get("prix")
+        mwrd_price = (etf_analyses or {}).get("MWRD.PA", {}).get("prix")
         wmms_gap = None
         if wmms_price and mwrd_price:
             wmms_gap = ((wmms_price / mwrd_price) - 1) * 100  # écart relatif
