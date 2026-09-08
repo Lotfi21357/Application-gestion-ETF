@@ -1,4 +1,3 @@
-cat > /home/claude/app.py << 'PYEOF_UNIQUE_MARKER_98213'
 # =============================================================================
 # COCKPIT DÉCISIONNEL BOURSIER v6.2 --- "ALERTE QUANT & ALLOCATION"
 # Lead Dev: Claude (Anthropic)
@@ -3388,6 +3387,3 @@ def main():
 
 if __name__ == "__main__" or True:
     main()
-PYEOF_UNIQUE_MARKER_98213
-echo "DONE: $(wc -l < /home/claude/app.py) lines written"
-python3 -c "import ast; ast.parse(open('/home/claude/app.py', encoding='utf-8').read()); print('Syntax OK')"
