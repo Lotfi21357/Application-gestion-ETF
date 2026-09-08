@@ -10,6 +10,7 @@
 #   • Capital investi = 15 023,05 €
 #   • CORRECTION : ajout de 'ticker' dans enrich_positions, parts calculées avec PRM unitaires
 #   • CORRECTION : p.get("ticker") dans main() pour éviter KeyError
+#   • CORRECTION : ticker WMMS changé en WMMS.XETRA pour récupérer le prix
 #
 # Requis (requirements.txt) :
 #   streamlit yfinance pandas numpy plotly PyGithub scipy ta requests_cache sqlalchemy tzdata
@@ -94,8 +95,8 @@ section[data-testid="stSidebar"] { background-color: #22252E; border-right: 1px 
 # ─────────────────────────────────────────────────────────────────────────────
 
 ETF_LIBRARY: Dict[str, Dict] = {
-    # Portefeuille actuel
-    "WMMS.XETRA": {"nom": "Amundi MSCI World IMI Value Screened", "name": "Amundi MSCI World IMI Value Screened Factor", "yf": "WMMS.DE", "yf_fallbacks": ["WMMS.XETRA"], "category": "Core", "theme": "Value", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.37},
+    # Portefeuille actuel - WMMS.XETRA est le symbole principal pour Yahoo Finance
+    "WMMS.XETRA": {"nom": "Amundi MSCI World IMI Value Screened", "name": "Amundi MSCI World IMI Value Screened Factor", "yf": "WMMS.XETRA", "yf_fallbacks": ["WMMS.DE"], "category": "Core", "theme": "Value", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.37},
     "DCAM.PA": {"nom": "MSCI World PEA", "name": "Amundi MSCI World UCITS PEA", "yf": "DCAM.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "PEA", "initial_target": 0.183},
     "MWRD.PA": {"nom": "MSCI World AV", "name": "Amundi MSCI World UCITS DR USD", "yf": "MWRD.PA", "yf_fallbacks": ["IWDA.AS", "EUNL.DE"], "category": "Core", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.154},
     "KRW.PA": {"nom": "MSCI Korea", "name": "Amundi MSCI Korea UCITS", "yf": "KRW.PA", "yf_fallbacks": [], "category": "Satellite", "theme": "Korea", "region": "Asia", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.155},
