@@ -8,6 +8,8 @@
 #   • Ajout de nouveaux ETF à la bibliothèque (CHIP, KRW, WMMS, LYXTNOW, IJPE, CV9, LYXFINW)
 #   • Positions initiales alignées sur les données fournies
 #   • Capital investi = 15 023,05 €
+#   • CORRECTION : ajout de 'ticker' dans enrich_positions, parts calculées avec PRM unitaires
+#   • CORRECTION : p.get("ticker") dans main() pour éviter KeyError
 #
 # Requis (requirements.txt) :
 #   streamlit yfinance pandas numpy plotly PyGithub scipy ta requests_cache sqlalchemy tzdata
@@ -88,7 +90,7 @@ section[data-testid="stSidebar"] { background-color: #22252E; border-right: 1px 
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 2 : CONSTANTES & CONFIGURATION (MIS À JOUR)
+# MODULE 2 : CONSTANTES & CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
 
 ETF_LIBRARY: Dict[str, Dict] = {
@@ -153,7 +155,6 @@ ETF_LIBRARY: Dict[str, Dict] = {
     "AUEM.PA": {"nom": "MSCI EM USD", "name": "Amundi ETF MSCI Emerging Markets USD", "yf": "AUEM.PA", "yf_fallbacks": [], "category": "Emerging", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
 }
 
-# Suppression de AASI.PA, plus de Gold
 GOLD_TICKERS_FALLBACK = []
 WORLD_TICKERS = ["WMMS.XETRA", "WMMS.DE", "MWRD.PA", "IWDA.AS", "EUNL.DE", "DCAM.PA"]
 PROXIES_KR = ["005930.KS", "000660.KS"]  # Samsung, SK Hynix
@@ -164,15 +165,16 @@ SENTINELLES = {"Samsung": ["005930.KS"], "SK Hynix": ["000660.KS"], "TSMC": ["TS
 BENCHMARK_NOM = "MSCI World AV"
 DATE_DEBUT = datetime(2025, 9, 17)
 
-_DEFAULT_CAPITAL_REEL = 15023.05  # Capital investi
+_DEFAULT_CAPITAL_REEL = 15023.05
 _DEFAULT_AJUSTEMENT_PAT = 0.0
 _DEFAULT_BONUS_FORTUNEO = 0.0
 _CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config_perso.json")
 _DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local.db")
 _PORTFOLIO_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "portfolio_positions.json")
 _TRANSACTIONS_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transactions.json")
+
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 3 : FONCTIONS CACHÉES ET DATA MANAGER OPTIMISÉ
+# MODULE 3 : DATA MANAGER
 # ─────────────────────────────────────────────────────────────────────────────
 
 requests_cache.install_cache('yfinance_cache', expire_after=86400)
@@ -294,7 +296,6 @@ class DataManager:
         self._log_returns_cache = result
         return result
 
-    # Helpers pour compatibilité avec l'ancien code
     def sma(self, series: pd.Series, n: int) -> Optional[float]:
         s = series.dropna()
         return float(s.rolling(n).mean().iloc[-1]) if len(s) >= n else None
@@ -317,37 +318,19 @@ class DataManager:
         return None
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 4 : ANALYTICS ENGINE (version institutionnelle avec corrélation)
+# MODULE 4 : ANALYTICS ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
 
 class AnalyticsEngine:
-    """
-    Moteur d'analyse quantitative vectorisé pour ETF.
-    Toutes les métriques utilisent des fenêtres temporelles explicites et cohérentes :
-    - 21 jours ouvrés  → 1 mois
-    - 63 jours ouvrés  → 3 mois
-    - 126 jours ouvrés → 6 mois
-    - 252 jours ouvrés → 1 an
-    - 756 jours ouvrés → 3 ans
-
-    Utilise 'Adj Close' en priorité, sinon 'Close'.
-    Benchmark pour la force relative et l'information ratio : MWRD.PA (MSCI World AV) ou WMMS selon dispo.
-    Taux sans risque par défaut : 2.5% annualisé (0.025).
-    """
-
-    # Constantes de fenêtres (en jours ouvrés)
     WINDOW_1M = 21
     WINDOW_3M = 63
     WINDOW_6M = 126
     WINDOW_1Y = 252
     WINDOW_3Y = 756
-
-    # Taux sans risque (annualisé)
     RISK_FREE_RATE = 0.025
 
     def __init__(self, dm: DataManager):
         self.dm = dm
-        # Récupération du benchmark principal (MWRD.PA en priorité, sinon WMMS)
         self.benchmark_ticker = "MWRD.PA"
         self.benchmark_df = dm.data.get(self.benchmark_ticker)
         if self.benchmark_df is None or self.benchmark_df.empty:
@@ -357,28 +340,21 @@ class AnalyticsEngine:
                     self.benchmark_ticker = wt
                     break
 
-    # -------------------------------------------------------------------------
-    # Méthodes internes de nettoyage et extraction des séries
-    # -------------------------------------------------------------------------
     def _get_price_column(self, df: pd.DataFrame) -> str:
-        """Retourne 'Adj Close' si disponible, sinon 'Close'."""
         if "Adj Close" in df.columns:
             return "Adj Close"
         return "Close"
 
     def _get_asset_series(self, ticker: str) -> pd.Series:
-        """Retourne la série de prix ajustés pour l'actif seul, sans alignement."""
         df = self.dm.data.get(ticker)
         if df is None or df.empty:
             return pd.Series(dtype=float)
         price_col = self._get_price_column(df)
         series = df[price_col].dropna().copy()
-        # Tri par date croissante
         series = series.sort_index()
         return series
 
     def _align_with_benchmark(self, ticker: str) -> Tuple[pd.Series, pd.Series]:
-        """Retourne (asset_series, benchmark_series) alignées sur les dates communes."""
         asset = self._get_asset_series(ticker)
         if asset.empty:
             return pd.Series(dtype=float), pd.Series(dtype=float)
@@ -390,11 +366,7 @@ class AnalyticsEngine:
             return asset, pd.Series(dtype=float)
         return asset.loc[common_idx], bench.loc[common_idx]
 
-    # -------------------------------------------------------------------------
-    # 1. Momentum sur différentes périodes (uniquement sur l'actif)
-    # -------------------------------------------------------------------------
     def _compute_momentum(self, close: pd.Series, window: int) -> float:
-        """Momentum sur window jours : (P_t / P_{t-window}) - 1, en pourcentage."""
         if len(close) < window + 1:
             return np.nan
         p0 = close.iloc[-window]
@@ -413,14 +385,7 @@ class AnalyticsEngine:
         close = self._get_asset_series(ticker)
         return self._compute_momentum(close, self.WINDOW_6M)
 
-    # -------------------------------------------------------------------------
-    # 2. Force relative (vs benchmark) basée sur les momentum 6M (log-ratio)
-    # -------------------------------------------------------------------------
     def compute_relative_strength(self, ticker: str) -> float:
-        """
-        Relative Strength = ln((ETF_t/ETF_{t-126}) / (Bench_t/Bench_{t-126})) * 100.
-        >0 signifie surperformance sur 6 mois.
-        """
         asset, bench = self._align_with_benchmark(ticker)
         if bench.empty or len(asset) < self.WINDOW_6M + 1 or len(bench) < self.WINDOW_6M + 1:
             return np.nan
@@ -430,11 +395,7 @@ class AnalyticsEngine:
             return np.nan
         return np.log(etf_ratio / bench_ratio) * 100.0
 
-    # -------------------------------------------------------------------------
-    # 3. Volatilité annualisée (sur 1 an, uniquement sur l'actif)
-    # -------------------------------------------------------------------------
     def compute_volatility(self, ticker: str, window: int = WINDOW_1Y) -> float:
-        """Volatilité annualisée (écart-type des rendements journaliers * sqrt(252)). Fenêtre glissante."""
         close = self._get_asset_series(ticker)
         if len(close) < window + 1:
             return np.nan
@@ -443,26 +404,15 @@ class AnalyticsEngine:
             return np.nan
         return returns.std() * np.sqrt(252) * 100.0
 
-    # -------------------------------------------------------------------------
-    # 4. Sharpe ratio annualisé (avec taux sans risque, fenêtre ajustée)
-    # -------------------------------------------------------------------------
     def compute_sharpe(self, ticker: str) -> float:
-        """
-        Sharpe annualisé = (Rendement annualisé - RF) / Volatilité annualisée.
-        Rendement annualisé calculé sur une fenêtre de 1 an (ou moins si historique insuffisant),
-        annualisé selon la formule (1+R)^(252/n) - 1.
-        """
         close = self._get_asset_series(ticker)
         if len(close) < 10:
             return np.nan
         n = min(len(close) - 1, self.WINDOW_1Y)
         if n <= 0:
             return np.nan
-        # Rendement sur n jours
         ret = close.iloc[-1] / close.iloc[-n] - 1.0
-        # Annualisation
         ann_return = (1.0 + ret) ** (252.0 / n) - 1.0
-        # Volatilité annualisée sur la même fenêtre
         returns = close.pct_change().dropna().iloc[-n:]
         if len(returns) < 10:
             return np.nan
@@ -471,24 +421,15 @@ class AnalyticsEngine:
             return np.nan
         return (ann_return - self.RISK_FREE_RATE) / ann_vol
 
-    # -------------------------------------------------------------------------
-    # 5. Sortino ratio (downside deviation institutionnelle)
-    # -------------------------------------------------------------------------
     def compute_sortino(self, ticker: str) -> float:
-        """
-        Sortino ratio = (Rendement annualisé - RF) / Downside Deviation annualisée.
-        Downside deviation = sqrt(moyenne des carrés des rendements en dessous de RF).
-        """
         close = self._get_asset_series(ticker)
         if len(close) < 10:
             return np.nan
         n = min(len(close) - 1, self.WINDOW_1Y)
         if n <= 0:
             return np.nan
-        # Rendement annualisé
         ret = close.iloc[-1] / close.iloc[-n] - 1.0
         ann_return = (1.0 + ret) ** (252.0 / n) - 1.0
-        # Rendements journaliers sur la même fenêtre
         returns = close.pct_change().dropna().iloc[-n:]
         if len(returns) < 10:
             return np.nan
@@ -499,27 +440,17 @@ class AnalyticsEngine:
             return np.nan
         return (ann_return - self.RISK_FREE_RATE) / downside_dev
 
-    # -------------------------------------------------------------------------
-    # 6. Information Ratio (vs benchmark)
-    # -------------------------------------------------------------------------
     def compute_information_ratio(self, ticker: str) -> float:
-        """
-        Information Ratio = (Rendement annualisé de l'actif - Rendement annualisé du benchmark) /
-                            Tracking Error (vol des différences journalières)
-        Fenêtre : 1 an (ou moins).
-        """
         asset, bench = self._align_with_benchmark(ticker)
         if bench.empty or len(asset) < 10 or len(bench) < 10:
             return np.nan
         n = min(min(len(asset)-1, len(bench)-1), self.WINDOW_1Y)
         if n <= 0:
             return np.nan
-        # Rendements annualisés
         ret_asset = asset.iloc[-1] / asset.iloc[-n] - 1.0
         ann_ret_asset = (1.0 + ret_asset) ** (252.0 / n) - 1.0
         ret_bench = bench.iloc[-1] / bench.iloc[-n] - 1.0
         ann_ret_bench = (1.0 + ret_bench) ** (252.0 / n) - 1.0
-        # Rendements journaliers
         asset_returns = asset.pct_change().dropna().iloc[-n:]
         bench_returns = bench.pct_change().dropna().iloc[-n:]
         common = asset_returns.index.intersection(bench_returns.index)
@@ -531,11 +462,7 @@ class AnalyticsEngine:
             return np.nan
         return (ann_ret_asset - ann_ret_bench) / tracking_error
 
-    # -------------------------------------------------------------------------
-    # 7. Drawdowns (1Y, 3Y, since inception) sur l'actif seul
-    # -------------------------------------------------------------------------
     def _compute_max_drawdown(self, series: pd.Series, window: int = None) -> float:
-        """Maximum Drawdown en pourcentage (négatif). window=None => tout l'historique."""
         if len(series) < 2:
             return np.nan
         if window is not None:
@@ -556,25 +483,17 @@ class AnalyticsEngine:
         close = self._get_asset_series(ticker)
         return self._compute_max_drawdown(close, None)
 
-    # -------------------------------------------------------------------------
-    # 8. RSI de Wilder (smoothing exponentiel)
-    # -------------------------------------------------------------------------
     def compute_rsi(self, ticker: str, period: int = 14) -> float:
-        """RSI de Wilder utilisant le lissage exponentiel (EWM)."""
         close = self._get_asset_series(ticker)
         if len(close) < period + 1:
             return np.nan
         delta = close.diff()
-        # Gain et loss avec lissage Wilder (smoothing factor = 1/period)
         gain = delta.clip(lower=0).ewm(alpha=1/period, adjust=False).mean()
         loss = (-delta.clip(upper=0)).ewm(alpha=1/period, adjust=False).mean()
         rs = gain / loss.replace(0, np.nan)
         rsi = 100 - (100 / (1 + rs))
         return float(rsi.iloc[-1]) if not rsi.empty and not np.isnan(rsi.iloc[-1]) else np.nan
 
-    # -------------------------------------------------------------------------
-    # 9. Distances aux SMA (sur l'actif seul)
-    # -------------------------------------------------------------------------
     def compute_distance_sma(self, ticker: str, window: int) -> float:
         close = self._get_asset_series(ticker)
         if len(close) < window:
@@ -584,38 +503,20 @@ class AnalyticsEngine:
             return np.nan
         return ((close.iloc[-1] / sma) - 1.0) * 100.0
 
-    # -------------------------------------------------------------------------
-    # 10. Corrélation de Pearson sur rendements logarithmiques (vs benchmark)
-    # -------------------------------------------------------------------------
     def compute_correlation(self, ticker: str, window: int = 126) -> float:
-        """
-        Corrélation de Pearson entre l'actif et le benchmark (MWRD.PA)
-        calculée sur les rendements logarithmiques journaliers.
-        Retourne une valeur entre -1 et +1 (non annualisée).
-        """
         asset, bench = self._align_with_benchmark(ticker)
         if asset.empty or bench.empty or len(asset) < window + 1 or len(bench) < window + 1:
             return np.nan
-
-        # Rendements logarithmiques journaliers
         asset_returns = np.log(asset / asset.shift(1))
         bench_returns = np.log(bench / bench.shift(1))
-
-        # Alignement strict et suppression des dates non communes
         returns_df = pd.concat([asset_returns, bench_returns], axis=1, join="inner").dropna()
-
         if len(returns_df) < window:
             return np.nan
-
         returns_df = returns_df.iloc[-window:]
         correlation = returns_df.iloc[:, 0].corr(returns_df.iloc[:, 1])
         return float(correlation) if pd.notna(correlation) else np.nan
 
-    # -------------------------------------------------------------------------
-    # 11. Méthode unifiée retournant toutes les métriques
-    # -------------------------------------------------------------------------
     def compute_all_metrics(self, ticker: str) -> dict:
-        """Retourne un dictionnaire avec toutes les métriques (compatible avec SignalEngine)."""
         close = self._get_asset_series(ticker)
         if close.empty:
             return {}
@@ -632,11 +533,10 @@ class AnalyticsEngine:
             "max_drawdown_1y": self.compute_max_drawdown_1y(ticker),
             "max_drawdown_3y": self.compute_max_drawdown_3y(ticker),
             "max_drawdown_since": self.compute_max_drawdown_since_inception(ticker),
-            "max_drawdown": self.compute_max_drawdown_1y(ticker),  # Pour compatibilité scoring
+            "max_drawdown": self.compute_max_drawdown_1y(ticker),
             "rsi": self.compute_rsi(ticker),
             "dist_sma20": self.compute_distance_sma(ticker, 20),
             "dist_sma50": self.compute_distance_sma(ticker, 50),
-            # Corrélations
             "corr_1m": self.compute_correlation(ticker, self.WINDOW_1M),
             "corr_3m": self.compute_correlation(ticker, self.WINDOW_3M),
             "corr_6m": self.compute_correlation(ticker, self.WINDOW_6M),
@@ -645,7 +545,7 @@ class AnalyticsEngine:
         return metrics
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 5 : SIGNAL ENGINE (scoring + arbitrage) - Adapté pour nouvelle allocation
+# MODULE 5 : SIGNAL ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
 
 class SignalEngine:
@@ -658,36 +558,29 @@ class SignalEngine:
         if not m:
             return {"score": 0, "metrics": {}}
         score = 0
-        # Momentum 6M (25 pts)
         mom6 = m.get("mom_6m", 0)
         if mom6 > 15: score += 25
         elif mom6 > 8: score += 18
         elif mom6 > 3: score += 10
         elif mom6 > 0: score += 4
-        # Force relative (20 pts)
         rel = m.get("rel_strength", 0)
         if rel > 8: score += 20
         elif rel > 4: score += 14
         elif rel > 0: score += 7
-        # Distance SMA20 (15 pts)
         dist20 = m.get("dist_sma20", 0)
         if dist20 > 5: score += 15
         elif dist20 > 2: score += 10
         elif dist20 > 0: score += 5
-        # Sharpe ratio (15 pts)
         sharpe = m.get("sharpe", 0)
         if sharpe > 1.5: score += 15
         elif sharpe > 0.8: score += 10
         elif sharpe > 0.3: score += 5
-        # RSI (5 pts)
         rsi = m.get("rsi", 50)
         if 55 <= rsi <= 70: score += 5
         elif rsi > 70: score += 2
-        # Drawdown 1Y (10 pts)
         dd = m.get("max_drawdown_1y", -50)
         if dd > -10: score += 10
         elif dd > -20: score += 5
-        # Volatilité (10 pts)
         vol = m.get("volatility", 30)
         if vol < 15: score += 10
         elif vol < 25: score += 5
@@ -713,7 +606,7 @@ class SignalEngine:
         return opportunities
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 6 : PERSISTENCE MANAGER (inchangé)
+# MODULE 6 : PERSISTENCE MANAGER
 # ─────────────────────────────────────────────────────────────────────────────
 
 _CSV_COLS = ["date", "capital_cloture", "valeur_titres",
@@ -872,6 +765,7 @@ class PersistenceManager:
     @property
     def warning_msg(self) -> str:
         return self._github_warning
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MODULE 7 : PORTFOLIO CONFIG MANAGER & TRANSACTION ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
@@ -889,18 +783,16 @@ class PortfolioConfigManager:
                     return data
         except Exception:
             pass
-        # Positions initiales au 6 septembre 2026 (parts = 1 pour simplifier, PRM calculé)
-        # WMMS : 37.0% de 17214.31 = 6369.29 €, perf 10.45% → PRM = valeur / (1+0.1045) ≈ 5765.5
-        # DCAM : 18.3% = 3140.96 €, perf 24.08% → PRM ≈ 2530.0
-        # MWRD : 15.4% = 2660.82 €, perf 6.91% → PRM ≈ 2488.8
-        # KRW  : 15.5% = 2660.70 €, perf 25.85% → PRM ≈ 2114.5
-        # CHIP : 13.8% = 2375.54 €, perf 11.47% → PRM ≈ 2130.5
+        # Montants investis initiaux (approximatifs)
+        # WMMS : 5757.0 €, DCAM : 2531.5 €, MWRD : 2488.8 €, KRW : 2114.5 €, CHIP : 2130.5 €
+        # PRM unitaires estimés (prix d'achat moyen)
+        # WMMS ~ 110 €, DCAM = 5.965 €, MWRD = 140.21 €, KRW ~ 50 €, CHIP ~ 70 €
         return [
-            {"ticker": "WMMS.XETRA", "parts": 1.0, "prm": 5765.5, "account": "AV"},
-            {"ticker": "DCAM.PA", "parts": 1.0, "prm": 2530.0, "account": "PEA"},
-            {"ticker": "MWRD.PA", "parts": 1.0, "prm": 2488.8, "account": "AV"},
-            {"ticker": "KRW.PA", "parts": 1.0, "prm": 2114.5, "account": "AV"},
-            {"ticker": "CHIP.PA", "parts": 1.0, "prm": 2130.5, "account": "AV"},
+            {"ticker": "WMMS.XETRA", "parts": 5757.0 / 110.0, "prm": 110.0, "account": "AV"},
+            {"ticker": "DCAM.PA",    "parts": 2531.5 / 5.965,   "prm": 5.965, "account": "PEA"},
+            {"ticker": "MWRD.PA",    "parts": 2488.8 / 140.21,  "prm": 140.21, "account": "AV"},
+            {"ticker": "KRW.PA",     "parts": 2114.5 / 50.0,    "prm": 50.0, "account": "AV"},
+            {"ticker": "CHIP.PA",    "parts": 2130.5 / 70.0,    "prm": 70.0, "account": "AV"},
         ]
 
     def save_positions(self, positions: List[Dict]) -> bool:
@@ -971,7 +863,7 @@ class TransactionEngine:
         return result
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 8 : MARKET REGIME ENGINE (inchangé)
+# MODULE 8 : MARKET REGIME ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
 
 _REGIME_LABELS = [
@@ -1094,7 +986,7 @@ class MarketRegimeEngine:
         return detail
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 9 : QUANT RISK ENGINE (adapté)
+# MODULE 9 : QUANT RISK ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
 
 class QuantRiskEngine:
@@ -1239,8 +1131,9 @@ class QuantRiskEngine:
         w = np.array(valid_w) / sum(valid_w)
         cov = df_all.cov().values * 252
         return float(np.sqrt(w @ cov @ w))
+
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 10 : PORTFOLIO ENGINE (adapté pour le nouveau portefeuille)
+# MODULE 10 : PORTFOLIO ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
 
 def enrich_positions(raw_positions: List[Dict]) -> List[Dict]:
@@ -1257,6 +1150,7 @@ def enrich_positions(raw_positions: List[Dict]) -> List[Dict]:
             "prm": float(pos.get("prm", 0.0)),
             "enveloppe": pos.get("account", meta["enveloppe"]),
             "_tk_id": tk_id,
+            "ticker": tk_id,  # ← AJOUT pour éviter KeyError
         })
     return result
 
@@ -1518,12 +1412,10 @@ class PortfolioEngine:
         return alerts
 
     def determine_phase(self, gap, etf_infos) -> Tuple[str, str]:
-        """Détermine la phase en fonction du gap et des signaux des ETF détenus."""
         if gap is None:
             return "⏳ Phase indéterminée --- Données insuffisantes", "#374151"
         if gap < 0:
             return "📉 Phase 1 : Reconquête --- Revenir à l'équilibre vs World AV", "#7F1D1D"
-        # Vérifier les SMA20 des ETF détenus
         signals = []
         for ticker, info in etf_infos.items():
             if info and info.get("sma20") and info.get("prix") and info["prix"] < info["sma20"]:
@@ -1533,7 +1425,6 @@ class PortfolioEngine:
             return f"🔄 Phase 3 : Rotation --- Sécuriser les gains ({', '.join(signals)})", "#78350F"
         return "🚀 Phase 2 : Alpha --- Battre le MSCI World", "#14532D"
 
-    # Méthodes pour projection objectifs
     def _compute_cagr_for_ticker(self, ticker: str, start_date: datetime = DATE_DEBUT) -> Tuple[float, bool]:
         df = self.dm.data.get(ticker)
         if df is None or df.empty or "Close" not in df.columns:
@@ -1585,7 +1476,7 @@ class PortfolioEngine:
                 return cagr, fall
             else:
                 return 0.07, True
-        else:  # AV
+        else:
             total_value = sum(p["valeur"] for p in env_positions)
             if total_value <= 0:
                 return 0.07, True
@@ -1605,7 +1496,7 @@ class PortfolioEngine:
             return weighted_cagr, any_fallback
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 11 : PEDAGOGIC ENGINE (adapté)
+# MODULE 11 : PEDAGOGIC ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
 
 class PedagogicEngine:
@@ -1750,7 +1641,6 @@ class PedagogicEngine:
         return {"score": simple, "stars": stars, "label": label, "ring_cls": ring_cls, "explain": explain, "action": action}
 
     def translate_sentinelles(self, sent_rows: List[Dict], sector: str) -> Dict:
-        # Pour les nouveaux ETF, on peut adapter les noms de sentinelles
         if sector == "korea":
             names = ["Samsung", "SK Hynix"]
         elif sector == "chip":
@@ -1768,15 +1658,14 @@ class PedagogicEngine:
         else:
             return {"emoji": "🔴", "level": "red", "message": "Décrochage fort des leaders.",
                     "detail": f"{', '.join([a['Sentinelle'] for a in alerts])} sous SMA20.", "action": "Réduction conseillée."}
+
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 12 : STRATEGIC ENGINE (inchangé)
+# MODULE 12 : STRATEGIC ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
 
 class StrategicEngine:
     def __init__(self, dm: DataManager, mre: MarketRegimeEngine, qre: QuantRiskEngine):
-        self.dm = dm
-        self.mre = mre
-        self.qre = qre
+        self.dm = dm; self.mre = mre; self.qre = qre
 
     def compute(self, ticker: str, unified_score: Dict, regime: Dict) -> Dict:
         details = []
@@ -1833,7 +1722,7 @@ class StrategicEngine:
         return {"total": total, "details": details, "verdict": verdict, "verdict_cls": verdict_cls}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 13 : FISCAL (inchangé)
+# MODULE 13 : FISCAL
 # ─────────────────────────────────────────────────────────────────────────────
 
 def net_apres_impots(enveloppe: str, montant: float, val_poche: float, gain_poche: float) -> Tuple[float, str]:
@@ -1858,7 +1747,7 @@ def net_apres_impots(enveloppe: str, montant: float, val_poche: float, gain_poch
     return montant, ""
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 14 : VISUALISATIONS (inchangées)
+# MODULE 14 : VISUALISATIONS
 # ─────────────────────────────────────────────────────────────────────────────
 
 _PLOTLY_BASE = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#CBD5E1", family="DM Sans"))
@@ -2064,8 +1953,9 @@ def plot_relative_perf(dm: DataManager, ticker: str, nom: str) -> Optional[go.Fi
         showlegend=False, xaxis=dict(gridcolor="#2E3340"), yaxis=dict(gridcolor="#2E3340", ticksuffix="%")
     )
     return fig
+
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 15 : STREAMLIT UI v5.9 (adapté pour le nouveau portefeuille)
+# MODULE 15 : STREAMLIT UI v5.9
 # ─────────────────────────────────────────────────────────────────────────────
 
 class StreamlitUI:
@@ -2091,7 +1981,6 @@ class StreamlitUI:
     def _sign(v: float) -> str:
         return "+" if v >= 0 else ""
 
-    # ── SIDEBAR ──
     def render_sidebar(self) -> Tuple[bool, List[Dict], float, float, float]:
         st.sidebar.markdown("## ⚙️ Paramètres v5.9")
         mode_direct = st.sidebar.toggle("🔌 Mode Direct (Vue Brute)", value=False)
@@ -2193,7 +2082,6 @@ class StreamlitUI:
                 pos["prm"] -= bonus_fortuneo / pos["parts"]
         return mode_direct, positions_conf, capital_reel, ajustement_pat, bonus_fortuneo
 
-    # ── HEADER ──
     def render_header(self, mode_direct: bool, live_ok: int, live_total: int):
         now = datetime.now(ZoneInfo("Europe/Paris"))
         st.markdown('<div style="display:flex;align-items:baseline;gap:1rem;margin-bottom:.2rem;">'
@@ -2211,7 +2099,6 @@ class StreamlitUI:
         if mode_direct:
             st.markdown('<div class="mode-direct-banner">🔌 MODE DIRECT ACTIF --- Valeur marchande pure</div>', unsafe_allow_html=True)
 
-    # ── BANDEAU RÉGIME ──
     def render_regime_banner(self, regime: Dict):
         sc = regime["confirmed_score"]
         label = regime["confirmed_label"]
@@ -2245,7 +2132,6 @@ class StreamlitUI:
                                     f'<div style="font-family:Space Mono;font-weight:700;color:{"#22C55E" if bull else "#FF3131" if bull is False else "#6B7585"};">{sc_}</div>'
                                     f'<div style="font-size:.68rem;color:#4B5563;margin-top:.2rem;">{comp["val"]}</div></div>', unsafe_allow_html=True)
 
-    # ── COMMAND CENTER ──
     def render_command_center(self, ptf: Dict, bench: Dict, mode_direct: bool, pm: PersistenceManager):
         st.markdown("## 🚀 Vue d'ensemble du portefeuille")
         perf_j_chain, perf_c_chain, base_cap = pm.compute_daily_performance(ptf["valeur_totale"])
@@ -2295,7 +2181,6 @@ class StreamlitUI:
                 body_bench = '<div class="kpi-value">N/A</div>'
             st.markdown(f'<div class="card card-blue"><div class="kpi-label">MSCI World MWR<span class="mwr-badge">AJUSTÉ</span><span class="live-badge">LIVE</span></div>{body_bench}</div>', unsafe_allow_html=True)
 
-        # Objectifs financiers
         st.markdown("### 🎯 Objectifs financiers")
         col_pea_obj, col_av_obj = st.columns(2)
         pea_value = ptf["val_env"].get("PEA", 0.0)
@@ -2347,7 +2232,6 @@ class StreamlitUI:
                         f'<div class="small">{av_progress}</div>'
                         f'</div>', unsafe_allow_html=True)
 
-        # Mes positions (avec colonne Perf. €)
         st.markdown("### 📊 Mes positions")
         col_t, col_p = st.columns([3, 2])
         with col_t:
@@ -2398,7 +2282,6 @@ class StreamlitUI:
                         f'<b>World MWR = {s(mwr_adj)}{mwr_adj:.2f}%</b> · '
                         f'<b style="color:{gc};">Votre Alpha = {s(gap)}{gap:.2f}%</b></div>', unsafe_allow_html=True)
 
-    # ── EQUITY CURVE ──
     def render_equity_curve_section(self, ptf: Dict, regime: Dict, positions_conf: List[Dict]):
         st.markdown("## 📈 Historique de votre capital")
         col_eq, col_snap = st.columns([3, 1])
@@ -2427,7 +2310,6 @@ class StreamlitUI:
             st.caption("Sauvegardez l'état du portefeuille ce soir.")
             vt = ptf["valeur_totale"]
             pj, pc, _ = self.pm.compute_daily_performance(vt)
-            # Calcul du poids des satellites (KRW + CHIP)
             krw_v = next((p["valeur"] for p in ptf["positions"] if p["nom"] == "MSCI Korea"), 0)
             chip_v = next((p["valeur"] for p in ptf["positions"] if p["nom"] == "MSCI Semiconductors"), 0)
             poids_sat = (krw_v + chip_v) / vt * 100 if vt else 0
@@ -2448,7 +2330,6 @@ class StreamlitUI:
                 st.markdown(f'<div class="small">Dernier : {history["date"].iloc[-1]}</div>', unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── LEADERSHIP COMPARISON ──
     def render_leadership_comparison(self, nom: str, ticker: str, color_sat: str = "#D4AF37"):
         st.markdown(f"### 📊 {nom} vs MSCI World --- Leadership hebdomadaire")
         with st.container():
@@ -2480,7 +2361,6 @@ class StreamlitUI:
         else:
             st.info("Données hebdomadaires insuffisantes. Revenez après quelques semaines.")
 
-    # ── RISK DASHBOARD ──
     def render_risk_dashboard(self, ptf: Dict):
         st.markdown("## ⚠️ Gestion des risques")
         with st.expander("❓ Comment lire les indicateurs de risque ?", expanded=False):
@@ -2489,13 +2369,11 @@ class StreamlitUI:
                         '<b>Sensibilité (Beta)</b> : si le marché baisse de 10% et Beta=1.5, l\'ETF peut baisser de 15%.<br><br>'
                         '<b>Recul depuis le sommet (Drawdown)</b> : distance depuis le dernier pic. -20% signifie une perte de 20%.</div>', unsafe_allow_html=True)
         st.markdown("### 🔍 Analyse de risque par ETF")
-        # Sélectionner les ETF du portefeuille
         risk_assets = []
         for pos in ptf["positions"]:
             if pos.get("ticker") and pos["valeur"] > 0:
                 ticker = pos["ticker"]
                 name = pos["nom"]
-                # Couleur selon l'ETF
                 color_map = {
                     "WMMS.XETRA": "#D4AF37",
                     "DCAM.PA": "#007BFF",
@@ -2574,7 +2452,6 @@ class StreamlitUI:
                             f_names = ", ".join([short.get(f, f) for f in flags])
                             st.markdown(f'<div class="alert-box">🚨 <b>Trop de risque concentré</b> : {f_names} représente plus de 40% du risque total. Rééquilibrez.</div>', unsafe_allow_html=True)
 
-    # ── SATELLITE CARD PÉDAGOGIQUE ──
     def render_satellite_card_pedagogic(self, nom: str, ticker: str, unified: Dict, target_weight: Dict,
                                         regime: Dict, sent_rows: List[Dict], sector: str):
         color_map = {"korea": "#F97316", "chip": "#A855F7"}
@@ -2647,12 +2524,9 @@ class StreamlitUI:
                 st.plotly_chart(fig_r, use_container_width=True, config={"displayModeBar": False})
                 st.caption("Courbe au-dessus de 0 = l'ETF surperforme le World depuis le début du suivi.")
 
-    # ── SENTINELLES & MACRO ──
     def render_sentinelles_macro(self, ptf: Dict):
         st.markdown("## 🛰️ Radar Sectoriel & Macro-économie")
-        # Tableaux de suivi des actions sous-jacentes
         st.markdown("### 📌 Valeurs de référence sectorielles")
-        # World
         st.markdown("#### 🌍 World (NVIDIA, Apple, Alphabet, Microsoft, Amazon)")
         world_stocks = [
             ("NVIDIA", "NVDA"), ("Apple", "AAPL"), ("Alphabet A", "GOOGL"),
@@ -2671,7 +2545,6 @@ class StreamlitUI:
                 "Variation vs SMA20": f"{self._sign(var)}{var:.2f}%" if var is not None else "N/A"
             })
         st.dataframe(pd.DataFrame(world_rows), use_container_width=True, hide_index=True)
-        # Korea
         st.markdown("#### 🇰🇷 Korea (Samsung, SK Hynix)")
         korea_stocks = [("Samsung", "005930.KS"), ("SK Hynix", "000660.KS")]
         korea_rows = []
@@ -2687,7 +2560,6 @@ class StreamlitUI:
                 "Variation vs SMA20": f"{self._sign(var)}{var:.2f}%" if var is not None else "N/A"
             })
         st.dataframe(pd.DataFrame(korea_rows), use_container_width=True, hide_index=True)
-        # Semiconductors
         st.markdown("#### 🔬 Semiconductors (TSMC, NVIDIA, AMD, Intel)")
         chip_stocks = [("TSMC", "TSM"), ("NVIDIA", "NVDA"), ("AMD", "AMD"), ("Intel", "INTC")]
         chip_rows = []
@@ -2704,7 +2576,6 @@ class StreamlitUI:
             })
         st.dataframe(pd.DataFrame(chip_rows), use_container_width=True, hide_index=True)
 
-        # Sentinelles générales
         s_msg, s_col, sent_rows = self.pe.evaluate_sentinelles()
         col_s, col_m = st.columns([3, 2])
         with col_s:
@@ -2722,13 +2593,12 @@ class StreamlitUI:
             krw_v = next((p["valeur"] for p in ptf["positions"] if p["nom"] == "MSCI Korea"), 0)
             chip_v = next((p["valeur"] for p in ptf["positions"] if p["nom"] == "MSCI Semiconductors"), 0)
             poids_sat = (krw_v + chip_v) / vt * 100 if vt else 0
-            delta_ps = poids_sat - 29.3  # cible 15.5+13.8 = 29.3%
+            delta_ps = poids_sat - 29.3
             st.metric("Korea + Semiconductors", f"{poids_sat:.1f}%", delta=f"{self._sign(delta_ps)}{delta_ps:.1f}% vs objectif 29.3%")
             bc = "#FF3131" if poids_sat > 35 else "#22C55E"
             st.markdown(f'<div style="background:#1C1F26;border-radius:6px;height:8px;"><div style="background:{bc};width:{min(poids_sat,100):.1f}%;height:8px;border-radius:6px;"></div></div>', unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
 
-            # Logique d'arbitrage automatique
             if vt > 0:
                 sat_alert = poids_sat > 35
                 if sat_alert:
@@ -2747,7 +2617,6 @@ class StreamlitUI:
             FMT = {"NQ=F": ".2f", "ES=F": ".2f", "^TNX": ".3f", "EURUSD=X": ".4f",
                    "BZ=F": ".2f", "GC=F": ".2f", "DX-Y.NYB": ".2f", "MCHI": ".2f"}
             SFX = {"^TNX": "%", "BZ=F": "$", "GC=F": "$"}
-            # Signaux ETF (Prix > SMA200)
             st.markdown("#### 📡 Signaux ETF (Prix > SMA200)")
             for etf_name, etf_ticker in [("WMMS", "WMMS.XETRA"), ("MWRD World", "MWRD.PA"),
                                          ("DCAM PEA", "DCAM.PA"), ("Korea", "KRW.PA"), ("CHIP", "CHIP.PA")]:
@@ -2770,19 +2639,16 @@ class StreamlitUI:
                     st.metric(lbl, "N/A")
             st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── COCKPIT DÉCISIONNEL LONG TERME ──
     def render_long_term_cockpit(self, ptf: Dict, analytics_engine: AnalyticsEngine, regime: Dict):
         st.markdown("## 📈 Cockpit Décisionnel Long Terme")
         st.caption("Résumé rapide pour le suivi des allocations.")
 
-        # Récupération des métriques pour les ETF détenus
         etf_metrics = {}
         for pos in ptf["positions"]:
             ticker = pos.get("ticker")
             if ticker:
                 etf_metrics[ticker] = analytics_engine.compute_all_metrics(ticker)
 
-        # Gap vs World pour chaque satellite
         def relative_perf_3w(ticker):
             df = self.dm.data.get(ticker)
             world_df = None
@@ -2804,7 +2670,6 @@ class StreamlitUI:
             world_ret = (world_close.iloc[-1] / world_close.iloc[-period-1] - 1) * 100 if len(world_close) >= period+1 else 0
             return asset_ret - world_ret
 
-        # Afficher les gaps
         col_g1, col_g2 = st.columns(2)
         with col_g1:
             st.markdown("#### Korea vs World")
@@ -2835,7 +2700,6 @@ class StreamlitUI:
             else:
                 st.markdown('<div class="card"><div class="kpi-label">Gap vs World (3 sem.)</div><div class="kpi-value">N/A</div></div>', unsafe_allow_html=True)
 
-        # Tableau récapitulatif pour tous les ETF
         st.markdown("### 📊 Résumé analytique des ETF")
         data = []
         for pos in ptf["positions"]:
@@ -2888,7 +2752,6 @@ class StreamlitUI:
         st.markdown(pd.DataFrame(data).to_html(escape=False, index=False), unsafe_allow_html=True)
         st.caption("Légende : 🟢 OK (vert) / 🟠 À surveiller (orange) / 🔴 Dégradé (rouge).")
 
-    # ── FISCAL SIMULATOR ──
     def render_fiscal_simulator(self, ptf: Dict):
         st.markdown("## 🧮 Simulateur Fiscal")
         st.caption("Calculez le montant net après impôts en cas de vente.")
@@ -2937,7 +2800,6 @@ class StreamlitUI:
                         f'<div><div class="kpi-label">Vous recevez</div><div class="kpi-value" style="color:#22C55E;">{net_sim:,.2f}€</div></div></div>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── TRANSACTIONS TAB ──
     def render_transactions_tab(self):
         st.markdown("## 📈 Journal des Transactions")
         st.caption("Enregistrez vos ordres BUY/SELL. Le moteur reconstruit automatiquement le portefeuille.")
@@ -3026,7 +2888,6 @@ class StreamlitUI:
                 st.success("✅ portfolio_positions.json mis à jour depuis les transactions !")
                 st.rerun()
 
-    # ── SCREENER TAB ──
     def render_screener_tab(self):
         st.markdown("## 🔍 Screener Quantitatif d'ETFs")
         st.caption("Scoring multi-facteurs (0-100) basé sur momentum 6M, force relative, Sharpe, volatilité, drawdown, RSI, tendance.")
@@ -3060,7 +2921,6 @@ class StreamlitUI:
         if st.button("📊 Afficher tous les ETFs", use_container_width=True):
             st.dataframe(df_scores, use_container_width=True, hide_index=True)
 
-    # ── POSITION SIZING MODELER ──
     def render_position_sizing(self, ptf: Dict, regime_label: str):
         st.markdown("### ⚖️ Position Sizing Modeler")
         st.caption("Poids cibles optimaux suggérés en fonction du régime macro.")
@@ -3082,7 +2942,6 @@ class StreamlitUI:
             if not meta:
                 continue
             cat = meta.get("category", "Satellite")
-            # Cibles spécifiques
             if pos["nom"] == "Amundi MSCI World IMI Value Screened":
                 base_target = 0.37
             elif pos["nom"] == "MSCI World PEA":
@@ -3108,7 +2967,6 @@ class StreamlitUI:
             })
         st.dataframe(pd.DataFrame(suggestions), use_container_width=True, hide_index=True)
 
-    # ── ARBITRAGE WIDGET ──
     def render_arbitrage_widget(self):
         if "positions" not in st.session_state:
             return
@@ -3124,7 +2982,6 @@ class StreamlitUI:
         else:
             st.markdown('<div class="arb-neutral">✅ Aucune opportunité d\'arbitrage significative détectée.</div>', unsafe_allow_html=True)
 
-    # ── FOOTER ──
     def render_footer(self, mode_direct: bool, capital: float, score_em: int, regime_label: str, live_ok: int, live_total: int):
         st.markdown("---")
         col_f1, col_f2 = st.columns([4, 1])
@@ -3139,7 +2996,6 @@ class StreamlitUI:
             if st.button("🔄 Rafraîchir", use_container_width=True):
                 st.cache_data.clear()
                 st.rerun()
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MODULE 16 : MAIN
@@ -3208,17 +3064,14 @@ def main():
 
     with st.spinner("⚙️ Calcul des indicateurs..."):
         ptf = pe.compute_portfolio(positions_conf, capital_reel, ajustement_pat, bonus_fortuneo)
-        # Les positions contiennent déjà parts, prm et gain_unit
         bench = pe.compute_benchmark(positions_conf, ptf["perf_tot_pct"])
         regime = mre.get_full_regime()
-        # Récupérer les analyses pour les ETF détenus
         etf_analyses = {}
         for pos in positions_conf:
             ticker = pos.get("ticker")
             if ticker:
                 info = dm.analyze_ticker(ticker)
                 etf_analyses[ticker] = info
-        # Calcul des scores pour les ETF
         unified_scores = {}
         target_weights = {}
         for pos in positions_conf:
@@ -3256,7 +3109,7 @@ def main():
         st.markdown("## 🧠 Analyse des ETF Satellites")
 
         # Korea
-        krw_pos = next((p for p in positions_conf if p["ticker"] == "KRW.PA"), None)
+        krw_pos = next((p for p in positions_conf if p.get("ticker") == "KRW.PA"), None)
         if krw_pos:
             ticker = "KRW.PA"
             krw_unified = unified_scores.get(ticker, {})
@@ -3272,7 +3125,7 @@ def main():
         st.markdown("<br>", unsafe_allow_html=True)
 
         # Semiconductors
-        chip_pos = next((p for p in positions_conf if p["ticker"] == "CHIP.PA"), None)
+        chip_pos = next((p for p in positions_conf if p.get("ticker") == "CHIP.PA"), None)
         if chip_pos:
             ticker = "CHIP.PA"
             chip_unified = unified_scores.get(ticker, {})
