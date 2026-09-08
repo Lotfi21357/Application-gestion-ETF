@@ -11,9 +11,10 @@
 #   • Détection des signaux de baisse probables
 #   • Intégration des données de volatilité manuelle (VKOSPI)
 #   • Toutes les fonctionnalités de suivi et screener conservées
+#   • Positions mises à jour au 8 septembre 2026
 #
 # Requis (requirements.txt) :
-#   streamlit yfinance pandas numpy plotly PyGithub scipy ta requests_cache sqlalchemy tzdata scikit-learn
+#   streamlit yfinance pandas numpy plotly PyGithub scipy ta requests_cache sqlalchemy tzdata
 # =============================================================================
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -33,8 +34,6 @@ from typing import Optional, Dict, List, Tuple
 import requests_cache
 from scipy import stats
 import ta  # technical analysis library
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler
 
 warnings.filterwarnings("ignore")
 
@@ -111,7 +110,54 @@ ETF_LIBRARY: Dict[str, Dict] = {
     "IJPE.PA": {"nom": "Japan Small Cap", "name": "iShares MSCI Japan Small Cap Acc", "yf": "IJPE.PA", "yf_fallbacks": [], "category": "Core", "theme": "Small Cap", "region": "Japan", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
     "CV9.PA": {"nom": "Europe Value", "name": "Amundi MSCI Europe Value Factor", "yf": "CV9.PA", "yf_fallbacks": [], "category": "Factor", "theme": "Value", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
     "LYXFINW.PA": {"nom": "World Financials", "name": "Amundi MSCI World Financials UCITS", "yf": "LYXFINW.PA", "yf_fallbacks": [], "category": "Sector", "theme": "Finance", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    # ... (le reste du catalogue)
+    # Catalogue élargi (conservé)
+    "500.PA": {"nom": "Amundi S&P 500", "name": "Amundi S&P 500 UCITS", "yf": "500.PA", "yf_fallbacks": [], "category": "Core", "theme": "Large Cap", "region": "USA", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "USTE.PA": {"nom": "Nasdaq-100", "name": "Lyxor UCITS Nasdaq-100 D-EUR", "yf": "USTE.PA", "yf_fallbacks": [], "category": "Core", "theme": "Tech", "region": "USA", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "CW8.PA": {"nom": "MSCI World CW8", "name": "Amundi MSCI World UCITS", "yf": "CW8.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "LYXHEA.PA": {"nom": "Europe Healthcare", "name": "Amundi STOXX Europe 600 Healthcare", "yf": "LYXHEA.PA", "yf_fallbacks": [], "category": "Sector", "theme": "Health", "region": "Europe", "risk_type": "Defensive", "enveloppe": "AV", "initial_target": 0.0},
+    "SPHC.PA": {"nom": "S&P 500 Hedged", "name": "Lyxor S&P 500 UCITS - Daily Hedged", "yf": "SPHC.PA", "yf_fallbacks": [], "category": "Core", "theme": "Large Cap", "region": "USA", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "WSRI.PA": {"nom": "World SRI", "name": "Amundi MSCI World SRI Climate Net", "yf": "WSRI.PA", "yf_fallbacks": [], "category": "ESG", "theme": "Sustainability", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "USTH.PA": {"nom": "Nasdaq Hedged", "name": "MULTI UNITS LUXEMBOURG - Lyxor Nasdaq Hedged", "yf": "USTH.PA", "yf_fallbacks": [], "category": "Core", "theme": "Tech", "region": "USA", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "ISEUMD.PA": {"nom": "Europe Mid Cap", "name": "iShares MSCI Europe Mid Cap Acc", "yf": "ISEUMD.PA", "yf_fallbacks": [], "category": "Core", "theme": "Mid Cap", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "ALAT.PA": {"nom": "EM Latin America", "name": "Amundi MSCI EM Latin America UCITS", "yf": "ALAT.PA", "yf_fallbacks": [], "category": "Emerging", "theme": "Commodities", "region": "LatAm", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "INDG.PA": {"nom": "Europe Industrials", "name": "Amundi STOXX Europe 600 Industrials", "yf": "INDG.PA", "yf_fallbacks": [], "category": "Sector", "theme": "Industrial", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "DJE.PA": {"nom": "Dow Jones", "name": "Amundi Dow Jones Industrial Average", "yf": "DJE.PA", "yf_fallbacks": [], "category": "Core", "theme": "Value", "region": "USA", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "NRAM.PA": {"nom": "North America ESG", "name": "AMUNDI MSCI North America ESG", "yf": "NRAM.PA", "yf_fallbacks": [], "category": "ESG", "theme": "Sustainability", "region": "NorthAmerica", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "GOAI.PA": {"nom": "Global AI", "name": "Amundi Stoxx Global Artificial Intelligence", "yf": "GOAI.PA", "yf_fallbacks": [], "category": "Satellite", "theme": "AI & Tech", "region": "Global", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "ENRGA.PA": {"nom": "Europe Energy", "name": "Amundi STOXX Europe 600 Energy", "yf": "ENRGA.PA", "yf_fallbacks": [], "category": "Sector", "theme": "Energy", "region": "Europe", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "JPNH.PA": {"nom": "Japan TOPIX", "name": "Amundi Japan TOPIX II UCITS EUR", "yf": "JPNH.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Japan", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "CSW.PA": {"nom": "Switzerland", "name": "Amundi ETF MSCI Switzerland UCITS", "yf": "CSW.PA", "yf_fallbacks": [], "category": "Core", "theme": "Defensive", "region": "Switzerland", "risk_type": "Defensive", "enveloppe": "AV", "initial_target": 0.0},
+    "CD9.PA": {"nom": "Europe High Dividend", "name": "Amundi MSCI Europe High Dividend", "yf": "CD9.PA", "yf_fallbacks": [], "category": "Factor", "theme": "Dividend", "region": "Europe", "risk_type": "Defensive", "enveloppe": "AV", "initial_target": 0.0},
+    "CJ1.PA": {"nom": "Japan MSCI", "name": "Amundi ETF MSCI Japan UCITS", "yf": "CJ1.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Japan", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "USRI.PA": {"nom": "USA SRI", "name": "AMUNDI MSCI USA SRI Climate Net", "yf": "USRI.PA", "yf_fallbacks": [], "category": "ESG", "theme": "Sustainability", "region": "USA", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "EBUY.PA": {"nom": "Digital Economy", "name": "Lyxor MSCI Digital", "yf": "EBUY.PA", "yf_fallbacks": [], "category": "Satellite", "theme": "Digital Economy", "region": "Global", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "COMO.PA": {"nom": "Commodities", "name": "Lyxor UCITS Commodities Thomson", "yf": "COMO.PA", "yf_fallbacks": [], "category": "Alternative", "theme": "Commodities", "region": "Global", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "CP9.PA": {"nom": "Pacific Ex Japan", "name": "Amundi ETF MSCI Pacific Ex Japan", "yf": "CP9.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Pacific", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "ESGWO.PA": {"nom": "World ESG Leaders", "name": "Amundi MSCI World ESG Leaders U", "yf": "ESGWO.PA", "yf_fallbacks": [], "category": "ESG", "theme": "Sustainability", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "IUSN.DE": {"nom": "World Small Cap", "name": "iShares MSCI World Small Cap UCITS", "yf": "IUSN.DE", "yf_fallbacks": [], "category": "Core", "theme": "Small Cap", "region": "Global", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "WLDHC.PA": {"nom": "World Monthly Hedged", "name": "Lyxor MSCI World UCITS Monthly Hedged", "yf": "WLDHC.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "ESCE.PA": {"nom": "EMU Small Cap", "name": "UBS ETF MSCI EMU Small Cap UCITS", "yf": "ESCE.PA", "yf_fallbacks": [], "category": "Core", "theme": "Small Cap", "region": "Europe", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "2B78.DE": {"nom": "Healthcare Innovation", "name": "iShares Healthcare Innovation Acc", "yf": "2B78.DE", "yf_fallbacks": [], "category": "Satellite", "theme": "Health Tech", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "CACC.PA": {"nom": "CAC 40", "name": "Lyxor CAC 40 (DR) UCITS Acc", "yf": "CACC.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "France", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "CN1.PA": {"nom": "Nordic", "name": "Amundi ETF MSCI Nordic UCITS", "yf": "CN1.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Nordic", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "LYXRIO.PA": {"nom": "Brazil", "name": "Amundi MSCI Brazil UCITS ETF Acc", "yf": "LYXRIO.PA", "yf_fallbacks": [], "category": "Emerging", "theme": "Blended", "region": "Brazil", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "C50.PA": {"nom": "Euro Stoxx 50", "name": "Amundi ETF Euro Stoxx 50 UCITS", "yf": "C50.PA", "yf_fallbacks": [], "category": "Core", "theme": "Large Cap", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "SMEA.PA": {"nom": "MSCI Europe", "name": "iShares MSCI Europe UCITS Acc", "yf": "SMEA.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "VEUR.PA": {"nom": "FTSE Developed Europe", "name": "Vanguard FTSE Developed Europe", "yf": "VEUR.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "MSE.PA": {"nom": "EURO STOXX 50", "name": "Amundi EURO STOXX 50 II UCITS Acc", "yf": "MSE.PA", "yf_fallbacks": [], "category": "Core", "theme": "Large Cap", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "100H.PA": {"nom": "FTSE 100 Hedged", "name": "Lyxor FTSE 100 Monthly Hedged C", "yf": "100H.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "UK", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "CC1U.PA": {"nom": "MSCI China", "name": "Amundi ETF MSCI China UCITS", "yf": "CC1U.PA", "yf_fallbacks": [], "category": "Emerging", "theme": "Blended", "region": "China", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "LYXDAX.PA": {"nom": "DAX", "name": "Lyxor DAX (DR) UCITS - Acc", "yf": "LYXDAX.PA", "yf_fallbacks": [], "category": "Core", "theme": "Large Cap", "region": "Germany", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "CMUD.PA": {"nom": "EMU ESG", "name": "Amundi MSCI EMU ESG Selection", "yf": "CMUD.PA", "yf_fallbacks": [], "category": "ESG", "theme": "Sustainability", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "AMCNEG.PA": {"nom": "China ESG", "name": "Amundi MSCI China ESG Leaders Sel", "yf": "AMCNEG.PA", "yf_fallbacks": [], "category": "ESG", "theme": "Sustainability", "region": "China", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "CMU.PA": {"nom": "MSCI EMU", "name": "Amundi MSCI EMU UCITS", "yf": "CMU.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "LYNRJ.PA": {"nom": "New Energy", "name": "Lyxor New Energy UCITS ETF Dist", "yf": "LYNRJ.PA", "yf_fallbacks": [], "category": "Satellite", "theme": "Clean Energy", "region": "Global", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "SCITY.PA": {"nom": "Smart City", "name": "Amundi Index Solutions - Amundi Smart City", "yf": "SCITY.PA", "yf_fallbacks": [], "category": "Satellite", "theme": "Megatrend", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "RS2U.PA": {"nom": "Resilient", "name": "Amundi Index Solutions - Amundi Resilient", "yf": "RS2U.PA", "yf_fallbacks": [], "category": "Factor", "theme": "Defensive", "region": "Europe", "risk_type": "Defensive", "enveloppe": "AV", "initial_target": 0.0},
+    "EUDF.PA": {"nom": "Europe Defence", "name": "WisdomTree Europe Defence UCITS", "yf": "EUDF.PA", "yf_fallbacks": [], "category": "Satellite", "theme": "Defense", "region": "Europe", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "AEEM.PA": {"nom": "MSCI EM", "name": "Amundi ETF MSCI Emerging Markets", "yf": "AEEM.PA", "yf_fallbacks": [], "category": "Emerging", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "LYXLEM.PA": {"nom": "MSCI EM Swap", "name": "Amundi MSCI Em Mkts Swap II UCIT", "yf": "LYXLEM.PA", "yf_fallbacks": [], "category": "Emerging", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "AUEM.PA": {"nom": "MSCI EM USD", "name": "Amundi ETF MSCI Emerging Markets USD", "yf": "AUEM.PA", "yf_fallbacks": [], "category": "Emerging", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
 }
 
 GOLD_TICKERS_FALLBACK = []
@@ -753,12 +799,13 @@ class PortfolioConfigManager:
                     return data
         except Exception:
             pass
+        # Positions mises à jour au 8 septembre 2026
         return [
-            {"ticker": "WMMS.XETRA", "parts": 5757.0 / 110.0, "prm": 110.0, "account": "AV"},
-            {"ticker": "DCAM.PA",    "parts": 2531.5 / 5.965,   "prm": 5.965, "account": "PEA"},
-            {"ticker": "MWRD.PA",    "parts": 2488.8 / 140.21,  "prm": 140.21, "account": "AV"},
-            {"ticker": "KRW.PA",     "parts": 2114.5 / 50.0,    "prm": 50.0, "account": "AV"},
-            {"ticker": "CHIP.PA",    "parts": 2130.5 / 70.0,    "prm": 70.0, "account": "AV"},
+            {"ticker": "WMMS.XETRA", "parts": 461.9561, "prm": 13.582, "account": "AV"},
+            {"ticker": "DCAM.PA",    "parts": 508.0000, "prm": 4.983, "account": "PEA"},
+            {"ticker": "MWRD.PA",    "parts": 16.6229, "prm": 149.718, "account": "AV"},
+            {"ticker": "KRW.PA",     "parts": 14.8501, "prm": 142.370, "account": "AV"},
+            {"ticker": "CHIP.PA",    "parts": 21.4922, "prm": 99.159, "account": "AV"},
         ]
 
     def save_positions(self, positions: List[Dict]) -> bool:
@@ -1462,7 +1509,7 @@ class PortfolioEngine:
             return weighted_cagr, any_fallback
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 11 : QUANT ALERT ENGINE (nouveau)
+# MODULE 11 : QUANT ALERT ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
 
 class QuantAlertEngine:
@@ -1586,7 +1633,7 @@ class QuantAlertEngine:
         }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 12 : PEDAGOGIC ENGINE (simplifié)
+# MODULE 12 : PEDAGOGIC ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
 
 class PedagogicEngine:
@@ -1750,7 +1797,7 @@ class PedagogicEngine:
                     "detail": f"{', '.join([a['Sentinelle'] for a in alerts])} sous SMA20.", "action": "Réduction conseillée."}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 13 : STRATEGIC ENGINE (simplifié)
+# MODULE 13 : STRATEGIC ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
 
 class StrategicEngine:
@@ -1837,7 +1884,7 @@ def net_apres_impots(enveloppe: str, montant: float, val_poche: float, gain_poch
     return montant, ""
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODULE 15 : VISUALISATIONS (raccourci)
+# MODULE 15 : VISUALISATIONS
 # ─────────────────────────────────────────────────────────────────────────────
 
 _PLOTLY_BASE = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#CBD5E1", family="DM Sans"))
@@ -2730,7 +2777,6 @@ class StreamlitUI:
                     st.metric(lbl, "N/A")
             st.markdown('</div>', unsafe_allow_html=True)
 
-    # NOUVEAU : ALERTE QUANTITATIVE
     def render_quant_alert(self, ptf: Dict):
         st.markdown("## 📊 ALERTE QUANTITATIVE (avant 16h30)")
         st.caption("Détection des probabilités de baisse sur J+1, J+2, J+3. Calcul de l'espérance de gain (EV) et du pourcentage de sortie conseillé.")
