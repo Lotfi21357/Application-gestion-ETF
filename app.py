@@ -1,8 +1,13 @@
+cat > /home/claude/app.py << 'PYEOF_UNIQUE_MARKER_98213'
 # =============================================================================
-# COCKPIT DÉCISIONNEL BOURSIER v6.1 --- "ALERTE QUANT & ALLOCATION"
+# COCKPIT DÉCISIONNEL BOURSIER v6.2 --- "ALERTE QUANT & ALLOCATION"
 # Lead Dev: Claude (Anthropic)
 # =============================================================================
-# v6.1 Évolutions majeures :
+# v6.2 Évolutions majeures (fix) :
+#   • CORRECTIF : résolution correcte des tickers Yahoo Finance dans
+#     etf_analyses (WMMS.XETRA -> WMMS.DE) qui causait un AttributeError
+#     sur wmms_price = (etf_analyses or {}).get("WMMS.XETRA", {}).get("prix")
+#   • Sécurisation défensive de tous les accès imbriqués .get().get()
 #   • Mise à jour du portefeuille : WMMS, DCAM, MWRD, KRW, CHIP
 #   • Module d'alerte quantitative avant 16h30 (cut-off)
 #   • Respect du cadre J+1, J+2, J+3 (persistance et probabilités)
@@ -45,7 +50,7 @@ except ImportError:
     PYGITHUB_OK = False
 
 st.set_page_config(
-    page_title="Cockpit v6.1 · Alerte Quant & Allocation",
+    page_title="Cockpit v6.2 · Alerte Quant & Allocation",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -1364,7 +1369,7 @@ class PortfolioEngine:
                 if info: break
             alerte = ""
             if info and info["sma20"] and info["prix"] and info["prix"] < info["sma20"]:
-                alerte = "⚠️"; alerts.append(name)
+                alerte = "⚠"; alerts.append(name)
             rows.append({
                 "Sentinelle": name,
                 "Prix": f"{info['prix']:.2f}" if info and info['prix'] else "N/A",
@@ -1372,7 +1377,7 @@ class PortfolioEngine:
                 "RSI": f"{info['rsi']:.1f}" if (info and info["rsi"]) else "N/A",
                 "Alerte": alerte
             })
-        msg = " | ".join([f"⚠️ {a} sous SMA20" for a in alerts]) if alerts else "✅ Sentinelles OK"
+        msg = " | ".join([f"⚠ {a} sous SMA20" for a in alerts]) if alerts else "✅ Sentinelles OK"
         return msg, "orange" if alerts else "green", rows
 
     def check_leadership_alerts(self) -> List[Dict]:
@@ -1636,9 +1641,9 @@ class PedagogicEngine:
         if beta < 0:
             emoji, level, msg, action = "🔄", "orange", "ETF à contre-courant du marché.", "Défensif intéressant."
         elif beta < 0.8:
-            emoji, level, msg, action = "🛡️", "green", f"Bouge {(1-beta)*100:.0f}% moins que le marché.", "Protège bien en baisse."
+            emoji, level, msg, action = "🛡", "green", f"Bouge {(1-beta)*100:.0f}% moins que le marché.", "Protège bien en baisse."
         elif beta < 1.2:
-            emoji, level, msg, action = "⚖️", "green", "Suit le marché de façon équilibrée.", "Comportement neutre."
+            emoji, level, msg, action = "⚖", "green", "Suit le marché de façon équilibrée.", "Comportement neutre."
         elif beta < 1.8:
             emoji, level, msg, action = "⚡", "orange", f"Bouge {(beta-1)*100:.0f}% plus violemment.", "Limitez la position."
         else:
@@ -1655,11 +1660,11 @@ class PedagogicEngine:
                     "explain": "Donnée indisponible.", "scale": [], "action": "Revérifier plus tard."}
         abs_dd = abs(current_dd)
         if abs_dd < 3:
-            emoji, level, msg, action = "🏔️", "green", f"{asset_name} est proche de son sommet.", "Aucune alerte."
+            emoji, level, msg, action = "🏔", "green", f"{asset_name} est proche de son sommet.", "Aucune alerte."
         elif abs_dd < 8:
             emoji, level, msg, action = "📉", "orange", f"Recul de {abs_dd:.1f}%, repli normal.", "Surveillance normale."
         elif abs_dd < 15:
-            emoji, level, msg, action = "⚠️", "orange", f"Recul de {abs_dd:.1f}%, correction significative.", "Vérifiez le stop-loss."
+            emoji, level, msg, action = "⚠", "orange", f"Recul de {abs_dd:.1f}%, correction significative.", "Vérifiez le stop-loss."
         else:
             emoji, level, msg, action = "🚨", "red", f"Chute de {abs_dd:.1f}%, perte importante.", "Envisagez de réduire."
         max_str = f" | Plus forte baisse 1 an : {abs(max_dd):.1f}%" if max_dd is not None else ""
@@ -1674,7 +1679,7 @@ class PedagogicEngine:
                          "action": "Maintenez vos positions, mais restez vigilant.", "conseil": "Préparez vos stops."},
             "Expansion": {"emoji": "📈", "level": "green", "explain": "Croissance régulière. Contexte favorable.",
                           "action": "Maintenez vos positions. Renforcements possibles.", "conseil": "Phase idéale pour Core+Satellites."},
-            "Neutre": {"emoji": "⚖️", "level": "orange", "explain": "Pas de direction claire. Autant de signaux positifs que négatifs.",
+            "Neutre": {"emoji": "⚖", "level": "orange", "explain": "Pas de direction claire. Autant de signaux positifs que négatifs.",
                        "action": "Réduisez légèrement les positions risquées si besoin.", "conseil": "Attendez une confirmation."},
             "Stress": {"emoji": "😟", "level": "orange", "explain": "Signes de fatigue. Nervosité accrue.",
                        "action": "Réduisez les satellites. Renforcez l'or ou le World.", "conseil": "Préservez votre capital."},
@@ -1759,7 +1764,7 @@ class PedagogicEngine:
             names = ["TSMC", "NVIDIA", "AMD", "Intel"]
         else:
             names = []
-        alerts = [r for r in sent_rows if r.get("Sentinelle") in names and r.get("Alerte") == "⚠️"]
+        alerts = [r for r in sent_rows if r.get("Sentinelle") in names and r.get("Alerte") == "⚠"]
         total = sum(1 for r in sent_rows if r.get("Sentinelle") in names)
         if not alerts:
             return {"emoji": "🟢", "level": "green", "message": "Leaders solides.",
@@ -1841,14 +1846,14 @@ def net_apres_impots(enveloppe: str, montant: float, val_poche: float, gain_poch
     if montant <= 0:
         return 0.0, ""
     if montant > val_poche:
-        return 0.0, "⚠️ Montant supérieur à la valeur de la poche"
+        return 0.0, "⚠ Montant supérieur à la valeur de la poche"
     ratio_gain = gain_poche / val_poche if val_poche else 0
     gain_retrait = montant * ratio_gain
     now_tz = datetime.now(ZoneInfo("Europe/Paris"))
     if enveloppe == "PEA":
         limite = datetime(2031, 4, 1, tzinfo=ZoneInfo("Europe/Paris"))
         if now_tz < limite:
-            return 0.0, "⚠️ Retrait PEA impossible avant le 01/04/2031 (fermeture enveloppe)"
+            return 0.0, "⚠ Retrait PEA impossible avant le 01/04/2031 (fermeture enveloppe)"
         return montant - 0.172 * gain_retrait, ""
     if enveloppe == "AV":
         if now_tz < datetime(2033, 9, 17, tzinfo=ZoneInfo("Europe/Paris")):
@@ -2095,7 +2100,7 @@ class StreamlitUI:
         return "+" if v >= 0 else ""
 
     def render_sidebar(self) -> Tuple[bool, List[Dict], float, float, float]:
-        st.sidebar.markdown("## ⚙️ Paramètres v6.1")
+        st.sidebar.markdown("## ⚙ Paramètres v6.2")
         mode_direct = st.sidebar.toggle("🔌 Mode Direct (Vue Brute)", value=False)
         st.sidebar.markdown("---")
         cap = st.sidebar.number_input("Capital investi (€)", value=st.session_state["cfg_capital_reel"], step=100.0, format="%.2f", key="input_capital_reel")
@@ -2113,7 +2118,7 @@ class StreamlitUI:
             st.sidebar.markdown(f'<div class="{cls}">{fb}</div>', unsafe_allow_html=True)
         st.sidebar.markdown("---")
 
-        with st.sidebar.expander("⚙️ Configuration des Positions", expanded=False):
+        with st.sidebar.expander("⚙ Configuration des Positions", expanded=False):
             st.caption("Modifiez vos positions. Sauvegarde automatique à chaque modification.")
             raw_pos = st.session_state["raw_positions"]
             new_raw = []
@@ -2148,7 +2153,7 @@ class StreamlitUI:
                     st.rerun()
 
         st.sidebar.markdown("---")
-        st.sidebar.markdown("### 🗑️ Supprimer un ETF")
+        st.sidebar.markdown("### 🗑 Supprimer un ETF")
         current_positions = self.pcm.load_positions()
         if current_positions:
             ticker_to_delete = st.sidebar.selectbox(
@@ -2174,13 +2179,13 @@ class StreamlitUI:
         if self.pm.status == "github":
             st.sidebar.markdown('<div class="persist-ok">🔗 GitHub Gist actif</div>', unsafe_allow_html=True)
         elif self.pm.warning_msg:
-            st.sidebar.markdown(f'<div class="persist-warn">⚠️ {self.pm.warning_msg}</div>', unsafe_allow_html=True)
+            st.sidebar.markdown(f'<div class="persist-warn">⚠ {self.pm.warning_msg}</div>', unsafe_allow_html=True)
         else:
             st.sidebar.markdown('<div class="persist-warn">📂 SQLite local</div>', unsafe_allow_html=True)
 
         st.sidebar.markdown("---")
         st.sidebar.markdown("### 📦 Positions (session)")
-        st.sidebar.caption("Modification en live. Utilisez '⚙️ Configuration' pour persister.")
+        st.sidebar.caption("Modification en live. Utilisez '⚙ Configuration' pour persister.")
         positions_conf = []
         for pos in st.session_state["positions"]:
             with st.sidebar.expander(pos["nom"]):
@@ -2200,7 +2205,7 @@ class StreamlitUI:
         st.markdown('<div style="display:flex;align-items:baseline;gap:1rem;margin-bottom:.2rem;">'
                     '<span style="font-family:Space Mono;font-size:1.6rem;font-weight:700;color:#D4AF37;">◈</span>'
                     '<span style="font-size:1.5rem;font-weight:700;color:#E2E8F0;">COCKPIT DÉCISIONNEL</span>'
-                    '<span style="font-family:Space Mono;font-size:.9rem;color:#6B7585;">v6.1 · ALERTE QUANT</span></div>', unsafe_allow_html=True)
+                    '<span style="font-family:Space Mono;font-size:.9rem;color:#6B7585;">v6.2 · ALERTE QUANT</span></div>', unsafe_allow_html=True)
         c1, c2 = st.columns([3, 1])
         with c1:
             st.caption(f"Prix live · {now.strftime('%d/%m/%Y %H:%M:%S')} (Paris) · Cache 30s/90s")
@@ -2222,7 +2227,7 @@ class StreamlitUI:
                     f'<span style="font-size:.82rem;margin-left:1rem;opacity:.8;">{conf}</span></div>'
                     f'<div style="font-family:Space Mono;font-size:1.2rem;">Score : <b>{sc:+d}/5</b></div>'
                     f'<div style="font-size:.78rem;opacity:.7;">3j : {s3}</div></div>', unsafe_allow_html=True)
-        with st.expander("ℹ️ Comment lire la météo des marchés ?", expanded=False):
+        with st.expander("ℹ Comment lire la météo des marchés ?", expanded=False):
             reg_trans = self.pde.translate_regime(regime)
             col_exp, col_comp = st.columns([1, 2])
             with col_exp:
@@ -2390,7 +2395,7 @@ class StreamlitUI:
         if mwr_adj is not None:
             gap = bench.get("gap", 0.0) or 0.0
             gc = "#22C55E" if gap >= 0 else "#FF3131"
-            st.markdown(f'<div class="pedagogy-box"><div class="pedagogy-title">🆕 v6.1 --- Benchmark MWR Cash-Flow Adjusted</div>'
+            st.markdown(f'<div class="pedagogy-box"><div class="pedagogy-title">🆕 v6.2 --- Benchmark MWR Cash-Flow Adjusted</div>'
                         f'Le "Gap vs World" est calculé en simulant l\'achat de MWRD.PA aux mêmes dates et montants que vos flux réels. '
                         f'<b>World MWR = {s(mwr_adj)}{mwr_adj:.2f}%</b> · '
                         f'<b style="color:{gc};">Votre Alpha = {s(gap)}{gap:.2f}%</b></div>', unsafe_allow_html=True)
@@ -2475,7 +2480,7 @@ class StreamlitUI:
             st.info("Données hebdomadaires insuffisantes. Revenez après quelques semaines.")
 
     def render_risk_dashboard(self, ptf: Dict):
-        st.markdown("## ⚠️ Gestion des risques")
+        st.markdown("## ⚠ Gestion des risques")
         with st.expander("❓ Comment lire les indicateurs de risque ?", expanded=False):
             st.markdown('<div class="pedagogy-box"><div class="pedagogy-title">Guide de lecture des risques</div>'
                         '<b>Agitation (Volatilité)</b> : mesure les oscillations quotidiennes. Plus c\'est élevé, plus l\'ETF peut monter ou baisser brutalement.<br><br>'
@@ -2575,12 +2580,13 @@ class StreamlitUI:
         st.markdown(f'<div class="card" style="border-top:3px solid {color};padding:0;overflow:hidden;">', unsafe_allow_html=True)
         c_score, c_action = st.columns([2, 3])
         with c_score:
+            gap_str = f"{gap_vs_world:+.2f}%" if gap_vs_world is not None else "N/A"
             st.markdown(f'<div style="padding:1.4rem 1.4rem .8rem 1.4rem;"><div class="kpi-label">{nom} --- Score Global</div>'
                         f'<div class="simple-score-ring {simple_score["ring_cls"]}" style="margin:1rem auto;">{strat_full["total"]}/5</div>'
                         f'<div style="text-align:center;margin:.4rem 0;"><span style="font-size:1.3rem;">{simple_score["stars"]}</span></div>'
                         f'<div style="text-align:center;font-weight:700;color:#E2E8F0;">{simple_score["label"]}</div>'
                         f'<div style="text-align:center;font-size:.82rem;color:#8892AA;">{simple_score["explain"]}</div>'
-                        f'<div style="text-align:center;font-size:.82rem;color:#6B7585;margin-top:.4rem;">Écart vs World : {gap_vs_world:+.2f}%</div>'
+                        f'<div style="text-align:center;font-size:.82rem;color:#6B7585;margin-top:.4rem;">Écart vs World : {gap_str}</div>'
                         f'</div>', unsafe_allow_html=True)
         with c_action:
             st.markdown('<div style="padding:1.4rem 1.4rem .8rem 1.4rem;">', unsafe_allow_html=True)
@@ -2605,7 +2611,7 @@ class StreamlitUI:
                     f'<b>Santé du secteur :</b> {sent_verdict["emoji"]} {sent_verdict["message"]}<br>'
                     f'<span style="font-size:.82rem;">{sent_verdict["detail"]}</span><br>'
                     f'<span style="font-size:.84rem;">💡 {sent_verdict["action"]}</span></div>', unsafe_allow_html=True)
-        with st.expander("⚙️ Allocation cible & ajustement", expanded=False):
+        with st.expander("⚙ Allocation cible & ajustement", expanded=False):
             col_gauge, col_detail = st.columns([1, 2])
             with col_gauge:
                 cur_pct = target_weight.get("current_pct", 0.0)
@@ -2641,7 +2647,7 @@ class StreamlitUI:
                 st.caption("Courbe au-dessus de 0 = l'ETF surperforme le World depuis le début du suivi.")
 
     def render_sentinelles_macro(self, ptf: Dict):
-        st.markdown("## 🛰️ Radar Sectoriel & Macro-économie")
+        st.markdown("## 🛰 Radar Sectoriel & Macro-économie")
         st.markdown("### 📌 Valeurs de référence sectorielles")
         st.markdown("#### 🌍 World (NVIDIA, Apple, Alphabet, Microsoft, Amazon)")
         world_stocks = [
@@ -2704,7 +2710,7 @@ class StreamlitUI:
                 st.warning(s_msg)
             st.dataframe(pd.DataFrame(sent_rows), use_container_width=True, hide_index=True)
             st.markdown("---")
-            st.markdown("#### ⚖️ Poids Satellites actuel (Korea + Semiconductors)")
+            st.markdown("#### ⚖ Poids Satellites actuel (Korea + Semiconductors)")
             vt = ptf["valeur_totale"]
             krw_v = next((p["valeur"] for p in ptf["positions"] if p["nom"] == "MSCI Korea"), 0)
             chip_v = next((p["valeur"] for p in ptf["positions"] if p["nom"] == "MSCI Semiconductors"), 0)
@@ -2946,7 +2952,7 @@ class StreamlitUI:
             st.caption(f"Gain latent PEA : {self._sign(gan_env['PEA'])}{gan_env['PEA']:,.2f}€")
             st.markdown('</div>', unsafe_allow_html=True)
         with col_av:
-            st.markdown('<div class="card card-blue"><h4>🛡️ Assurance-Vie</h4>', unsafe_allow_html=True)
+            st.markdown('<div class="card card-blue"><h4>🛡 Assurance-Vie</h4>', unsafe_allow_html=True)
             net, avert = net_apres_impots("AV", val_env["AV"], val_env["AV"], gan_env["AV"])
             if avert:
                 st.warning(avert)
@@ -3020,7 +3026,7 @@ class StreamlitUI:
                         else:
                             st.error("❌ Erreur d'écriture transactions.json")
                     else:
-                        st.warning("⚠️ Parts et Prix doivent être > 0")
+                        st.warning("⚠ Parts et Prix doivent être > 0")
             with col_info:
                 if tx_parts > 0 and tx_price > 0:
                     montant = tx_parts * tx_price
@@ -3100,7 +3106,7 @@ class StreamlitUI:
             st.dataframe(df_scores, use_container_width=True, hide_index=True)
 
     def render_position_sizing(self, ptf: Dict, regime_label: str):
-        st.markdown("### ⚖️ Position Sizing Modeler")
+        st.markdown("### ⚖ Position Sizing Modeler")
         st.caption("Poids cibles optimaux suggérés en fonction du régime macro.")
         total_val = ptf["valeur_totale"]
         if total_val <= 0:
@@ -3167,7 +3173,7 @@ class StreamlitUI:
             s = self._sign
             mode_txt = "🔌 MODE DIRECT" if mode_direct else "Ajust. patrimonial actif"
             persist = "GitHub Gist + SQLite" if self.pm.status == "github" else "SQLite local"
-            st.caption(f"◈ Cockpit v6.1 · Alerte Quant · {mode_txt} · "
+            st.caption(f"◈ Cockpit v6.2 · Alerte Quant · {mode_txt} · "
                        f"Régime : {regime_label} · Capital {capital:,.2f}€ · Persistance : {persist} · {live_ok}/{live_total} prix live · "
                        f"Benchmark : MWR Cash-Flow Adjusted · Outil personnel --- Ne constitue pas un conseil en investissement")
         with col_f2:
@@ -3242,15 +3248,26 @@ def main():
 
     mode_direct, positions_conf, capital_reel, ajustement_pat, bonus_fortuneo = ui.render_sidebar()
 
-    with st.spinner("⚙️ Calcul des indicateurs..."):
+    with st.spinner("⚙ Calcul des indicateurs..."):
         ptf = pe.compute_portfolio(positions_conf, capital_reel, ajustement_pat, bonus_fortuneo)
         bench = pe.compute_benchmark(positions_conf, ptf["perf_tot_pct"])
         regime = mre.get_full_regime()
+
+        # --- CORRECTIF v6.2 ---------------------------------------------------
+        # etf_analyses est indexé par la clé ETF_LIBRARY (ex: "WMMS.XETRA"),
+        # mais DataManager stocke ses données sous le ticker Yahoo Finance réel
+        # (ex: "WMMS.DE"). On résout donc explicitement le ticker Yahoo via
+        # ETF_LIBRARY avant d'appeler analyze_ticker, pour éviter que la valeur
+        # associée à une clé existante soit None (ce qui cassait ensuite
+        # tout accès en chaîne .get(...).get("prix")).
+        # ------------------------------------------------------------------------
         etf_analyses = {}
         for pos in positions_conf:
             ticker = pos.get("ticker")
             if ticker:
-                info = dm.analyze_ticker(ticker)
+                meta_tk = ETF_LIBRARY.get(ticker, {})
+                yf_ticker = meta_tk.get("yf", ticker)
+                info = dm.analyze_ticker(yf_ticker)
                 etf_analyses[ticker] = info
         # Sécurisation : si pour une raison quelconque etf_analyses est None, on le réinitialise
         if etf_analyses is None:
@@ -3271,9 +3288,12 @@ def main():
         live_total = len(dm.live)
 
         # Calcul de l'écart vs World pour WMMS (World Value) par rapport à MWRD
-        # Utilisation de (etf_analyses or {}) pour éviter l'erreur
-        wmms_price = (etf_analyses or {}).get("WMMS.XETRA", {}).get("prix")
-        mwrd_price = (etf_analyses or {}).get("MWRD.PA", {}).get("prix")
+        # CORRECTIF v6.2 : (etf_analyses or {}).get(ticker, {}) ne suffit pas si
+        # la clé existe déjà avec une valeur None (le défaut {} ne s'applique
+        # que si la clé est absente). On sécurise donc avec un "or {}" après
+        # le premier .get() également.
+        wmms_price = ((etf_analyses or {}).get("WMMS.XETRA") or {}).get("prix")
+        mwrd_price = ((etf_analyses or {}).get("MWRD.PA") or {}).get("prix")
         wmms_gap = None
         if wmms_price and mwrd_price:
             wmms_gap = ((wmms_price / mwrd_price) - 1) * 100  # écart relatif
@@ -3289,7 +3309,7 @@ def main():
             if gv < -5:
                 cls, ico = "alert-critical", "🚨"
             elif gv < -2:
-                cls, ico = "alert-leadership", "⚠️"
+                cls, ico = "alert-leadership", "⚠"
             else:
                 continue
             st.markdown(f'<div class="{cls}">{ico} <b>ALERTE : {nom_al}</b> --- {abs(gv):.1f}% en retard sur le World sur 14 jours '
@@ -3310,11 +3330,15 @@ def main():
             wmms_info = etf_analyses.get(ticker)
             if wmms_info:
                 border = "#22C55E" if (wmms_info.get("sma20") and wmms_info.get("prix") and wmms_info["prix"] > wmms_info["sma20"]) else "#D4AF37"
+                gap_display = f"{wmms_gap:+.2f}%" if wmms_gap is not None else "N/A"
                 st.markdown(f'<div class="card" style="border-left:4px solid {border};margin-bottom:.5rem;">'
-                            f'<b>📈 Amundi MSCI World IMI Value Screened (WMMS) - Écart vs World : {wmms_gap:+.2f}%</b></div>', unsafe_allow_html=True)
+                            f'<b>📈 Amundi MSCI World IMI Value Screened (WMMS) - Écart vs World : {gap_display}</b></div>', unsafe_allow_html=True)
                 with st.container():
                     st.markdown("### 📈 Amundi MSCI World IMI Value Screened (WMMS)")
                     ui.render_satellite_card_pedagogic("WMMS Value", "WMMS.XETRA", wmms_unified, wmms_target, regime, sent_rows, "value", gap_vs_world=wmms_gap)
+            else:
+                st.markdown('<div class="card card-orange"><div class="kpi-label">WMMS Value</div>'
+                            '<div class="small">Données indisponibles pour cet ETF pour le moment (vérifiez le ticker Yahoo Finance WMMS.DE).</div></div>', unsafe_allow_html=True)
         st.markdown("<br>", unsafe_allow_html=True)
 
         # 2. Korea
@@ -3364,3 +3388,6 @@ def main():
 
 if __name__ == "__main__" or True:
     main()
+PYEOF_UNIQUE_MARKER_98213
+echo "DONE: $(wc -l < /home/claude/app.py) lines written"
+python3 -c "import ast; ast.parse(open('/home/claude/app.py', encoding='utf-8').read()); print('Syntax OK')"
