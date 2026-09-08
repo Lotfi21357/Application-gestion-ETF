@@ -1,12 +1,22 @@
 # =============================================================================
-# COCKPIT DÉCISIONNEL BOURSIER v6.3 --- "ALERTE QUANT & ALLOCATION"
+# COCKPIT DÉCISIONNEL BOURSIER v6.2 --- "ALERTE QUANT & ALLOCATION"
 # Lead Dev: Claude (Anthropic)
 # =============================================================================
-# v6.3 Corrections :
-#   • CORRECTIF : Screener gère les cas où df_scores est vide ou trop petit
-#   • CORRECTIF : get_weekly_performances essaie tous les tickers (yf + fallbacks)
-#   • CORRECTIF : wmms_gap calculé directement via dm.live avec fallback WMMS.XETRA
-#   • Conservation de toutes les fonctionnalités v6.2
+# v6.2 Évolutions majeures (fix) :
+#   • CORRECTIF : résolution correcte des tickers Yahoo Finance dans
+#     etf_analyses (WMMS.XETRA -> WMMS.DE) qui causait un AttributeError
+#     sur wmms_price = (etf_analyses or {}).get("WMMS.XETRA", {}).get("prix")
+#   • Sécurisation défensive de tous les accès imbriqués .get().get()
+#   • Mise à jour du portefeuille : WMMS, DCAM, MWRD, KRW, CHIP
+#   • Module d'alerte quantitative avant 16h30 (cut-off)
+#   • Respect du cadre J+1, J+2, J+3 (persistance et probabilités)
+#   • Calcul d'espérance de gain (EV) avec coûts d'arbitrage (10 bps)
+#   • Plafonnement de l'exposition par paliers (0%, 25%, 50%, 75%)
+#   • Détection des signaux de baisse probables
+#   • Positions mises à jour au 8 septembre 2026
+#   • Performance World forcée à 17,15% (selon données du 08/09/2026)
+#   • Ajout de l'ETF World Value (WMMS) dans l'analyse des satellites
+#   • Toutes les fonctionnalités de suivi et screener conservées
 #
 # Requis (requirements.txt) :
 #   streamlit yfinance pandas numpy plotly PyGithub scipy requests_cache sqlalchemy tzdata
@@ -39,7 +49,7 @@ except ImportError:
     PYGITHUB_OK = False
 
 st.set_page_config(
-    page_title="Cockpit v6.3 · Alerte Quant & Allocation",
+    page_title="Cockpit v6.2 · Alerte Quant & Allocation",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -1692,21 +1702,20 @@ class PedagogicEngine:
         """
         Récupère les performances hebdomadaires d'un ETF par rapport au World.
         ticker_key est la clé de la bibliothèque (ex: "WMMS.XETRA").
-        On essaie tous les tickers (yf et fallbacks) jusqu'à trouver des données.
+        On résout automatiquement le ticker Yahoo Finance réel.
         """
         # Résolution du ticker yfinance
         meta = ETF_LIBRARY.get(ticker_key, {})
-        possible_tickers = [meta.get("yf")] + meta.get("yf_fallbacks", [])
-        possible_tickers = [t for t in possible_tickers if t]  # enlever None
-        sat_df = None
-        used_ticker = None
-        for t in possible_tickers:
-            df = dm.data.get(t)
-            if df is not None and not df.empty and "Close" in df.columns:
-                sat_df = df
-                used_ticker = t
-                break
-        if sat_df is None:
+        yf_ticker = meta.get("yf", ticker_key)
+        # Fallbacks éventuels
+        sat_df = dm.data.get(yf_ticker, pd.DataFrame())
+        if sat_df.empty:
+            for fb in meta.get("yf_fallbacks", []):
+                sat_df = dm.data.get(fb, pd.DataFrame())
+                if not sat_df.empty:
+                    yf_ticker = fb
+                    break
+        if sat_df.empty:
             return [], [], []
 
         world_close = None
@@ -1731,8 +1740,6 @@ class PedagogicEngine:
         sat_ret = sat_w.pct_change().dropna() * 100
         world_ret = world_w.pct_change().dropna() * 100
         n = min(n_weeks, len(sat_ret))
-        if n == 0:
-            return [], [], []
         sat_ret = sat_ret.iloc[-n:]; world_ret = world_ret.iloc[-n:]
         labels = ["En cours" if i == n-1 else f"S-{n-1-i}" for i in range(n)]
         return labels, list(sat_ret.values), list(world_ret.values)
@@ -2118,7 +2125,7 @@ class StreamlitUI:
         return "+" if v >= 0 else ""
 
     def render_sidebar(self) -> Tuple[bool, List[Dict], float, float, float]:
-        st.sidebar.markdown("## ⚙ Paramètres v6.3")
+        st.sidebar.markdown("## ⚙ Paramètres v6.2")
         mode_direct = st.sidebar.toggle("🔌 Mode Direct (Vue Brute)", value=False)
         st.sidebar.markdown("---")
         cap = st.sidebar.number_input("Capital investi (€)", value=st.session_state["cfg_capital_reel"], step=100.0, format="%.2f", key="input_capital_reel")
@@ -2223,7 +2230,7 @@ class StreamlitUI:
         st.markdown('<div style="display:flex;align-items:baseline;gap:1rem;margin-bottom:.2rem;">'
                     '<span style="font-family:Space Mono;font-size:1.6rem;font-weight:700;color:#D4AF37;">◈</span>'
                     '<span style="font-size:1.5rem;font-weight:700;color:#E2E8F0;">COCKPIT DÉCISIONNEL</span>'
-                    '<span style="font-family:Space Mono;font-size:.9rem;color:#6B7585;">v6.3 · ALERTE QUANT</span></div>', unsafe_allow_html=True)
+                    '<span style="font-family:Space Mono;font-size:.9rem;color:#6B7585;">v6.2 · ALERTE QUANT</span></div>', unsafe_allow_html=True)
         c1, c2 = st.columns([3, 1])
         with c1:
             st.caption(f"Prix live · {now.strftime('%d/%m/%Y %H:%M:%S')} (Paris) · Cache 30s/90s")
@@ -2413,7 +2420,7 @@ class StreamlitUI:
         if mwr_adj is not None:
             gap = bench.get("gap", 0.0) or 0.0
             gc = "#22C55E" if gap >= 0 else "#FF3131"
-            st.markdown(f'<div class="pedagogy-box"><div class="pedagogy-title">🆕 v6.3 --- Benchmark MWR Cash-Flow Adjusted</div>'
+            st.markdown(f'<div class="pedagogy-box"><div class="pedagogy-title">🆕 v6.2 --- Benchmark MWR Cash-Flow Adjusted</div>'
                         f'Le "Gap vs World" est calculé en simulant l\'achat de MWRD.PA aux mêmes dates et montants que vos flux réels. '
                         f'<b>World MWR = {s(mwr_adj)}{mwr_adj:.2f}%</b> · '
                         f'<b style="color:{gc};">Votre Alpha = {s(gap)}{gap:.2f}%</b></div>', unsafe_allow_html=True)
@@ -3089,11 +3096,9 @@ class StreamlitUI:
         with st.spinner("Calcul des scores en cours... (peut prendre quelques secondes)"):
             scores = []
             for ticker, meta in ETF_LIBRARY.items():
-                # Résoudre le ticker Yahoo réel pour le signal
-                yf_ticker = meta.get("yf", ticker)
-                if yf_ticker not in self.dm.data:
+                if ticker not in self.dm.data:
                     continue
-                res = self.signal.compute_score(yf_ticker)
+                res = self.signal.compute_score(ticker)
                 if res["score"] == 0 and not res["metrics"]:
                     continue
                 scores.append({
@@ -3113,14 +3118,7 @@ class StreamlitUI:
                     "Corr 1Y": f"{res['metrics'].get('corr_1y', 0):.2f}" if res['metrics'].get('corr_1y') is not None else "N/A",
                 })
             df_scores = pd.DataFrame(scores).sort_values("Score", ascending=False)
-
-        # Gestion du cas vide ou trop petit
-        if df_scores.empty:
-            st.warning("Aucun ETF n'a pu être analysé (données manquantes). Vérifiez votre connexion ou les tickers.")
-            return
-        max_val = len(df_scores)
-        min_val = min(5, max_val)
-        top_n = st.slider("Nombre d'ETFs à afficher", min_value=min_val, max_value=max_val, value=min(20, max_val), step=5)
+        top_n = st.slider("Nombre d'ETFs à afficher", min_value=5, max_value=len(df_scores), value=min(20, len(df_scores)), step=5)
         st.dataframe(df_scores.head(top_n), use_container_width=True, hide_index=True)
         if st.button("📊 Afficher tous les ETFs", use_container_width=True):
             st.dataframe(df_scores, use_container_width=True, hide_index=True)
@@ -3193,7 +3191,7 @@ class StreamlitUI:
             s = self._sign
             mode_txt = "🔌 MODE DIRECT" if mode_direct else "Ajust. patrimonial actif"
             persist = "GitHub Gist + SQLite" if self.pm.status == "github" else "SQLite local"
-            st.caption(f"◈ Cockpit v6.3 · Alerte Quant · {mode_txt} · "
+            st.caption(f"◈ Cockpit v6.2 · Alerte Quant · {mode_txt} · "
                        f"Régime : {regime_label} · Capital {capital:,.2f}€ · Persistance : {persist} · {live_ok}/{live_total} prix live · "
                        f"Benchmark : MWR Cash-Flow Adjusted · Outil personnel --- Ne constitue pas un conseil en investissement")
         with col_f2:
@@ -3273,22 +3271,14 @@ def main():
         bench = pe.compute_benchmark(positions_conf, ptf["perf_tot_pct"])
         regime = mre.get_full_regime()
 
-        # --- CORRECTIF v6.3 : calcul de wmms_gap via dm.live avec fallback ---
-        wmms_price = None
-        # Essayer WMMS.DE d'abord
-        live_wmms = dm.live.get("WMMS.DE", {})
-        if live_wmms.get("prix"):
-            wmms_price = live_wmms["prix"]
-        else:
-            live_wmms = dm.live.get("WMMS.XETRA", {})
-            if live_wmms.get("prix"):
-                wmms_price = live_wmms["prix"]
-        mwrd_price = dm.live.get("MWRD.PA", {}).get("prix")
-        wmms_gap = None
-        if wmms_price and mwrd_price:
-            wmms_gap = ((wmms_price / mwrd_price) - 1) * 100
-
-        # Récupération des analyses ETF (pour les satellites, etc.)
+        # --- CORRECTIF v6.2 ---------------------------------------------------
+        # etf_analyses est indexé par la clé ETF_LIBRARY (ex: "WMMS.XETRA"),
+        # mais DataManager stocke ses données sous le ticker Yahoo Finance réel
+        # (ex: "WMMS.DE"). On résout donc explicitement le ticker Yahoo via
+        # ETF_LIBRARY avant d'appeler analyze_ticker, pour éviter que la valeur
+        # associée à une clé existante soit None (ce qui cassait ensuite
+        # tout accès en chaîne .get(...).get("prix")).
+        # ------------------------------------------------------------------------
         etf_analyses = {}
         for pos in positions_conf:
             ticker = pos.get("ticker")
@@ -3297,6 +3287,7 @@ def main():
                 yf_ticker = meta_tk.get("yf", ticker)
                 info = dm.analyze_ticker(yf_ticker)
                 etf_analyses[ticker] = info
+        # Sécurisation : si pour une raison quelconque etf_analyses est None, on le réinitialise
         if etf_analyses is None:
             etf_analyses = {}
 
@@ -3308,10 +3299,22 @@ def main():
                 unified_scores[ticker] = pe.compute_unified_score(ticker)
                 target_weights[ticker] = pe.compute_target_weight(pos["nom"], ticker, ptf["valeur_totale"], ptf["positions"])
         ld_alerts = pe.check_leadership_alerts()
+        # Passage sécurisé de etf_analyses (ou {}) à determine_phase
         phase_text, phase_color = pe.determine_phase(bench.get("gap"), etf_analyses or {})
         _, _, sent_rows = pe.evaluate_sentinelles()
         live_ok = sum(1 for v in dm.live.values() if v.get("prix"))
         live_total = len(dm.live)
+
+        # Calcul de l'écart vs World pour WMMS (World Value) par rapport à MWRD
+        # CORRECTIF v6.2 : (etf_analyses or {}).get(ticker, {}) ne suffit pas si
+        # la clé existe déjà avec une valeur None (le défaut {} ne s'applique
+        # que si la clé est absente). On sécurise donc avec un "or {}" après
+        # le premier .get() également.
+        wmms_price = ((etf_analyses or {}).get("WMMS.XETRA") or {}).get("prix")
+        mwrd_price = ((etf_analyses or {}).get("MWRD.PA") or {}).get("prix")
+        wmms_gap = None
+        if wmms_price and mwrd_price:
+            wmms_gap = ((wmms_price / mwrd_price) - 1) * 100  # écart relatif
 
     tab_dashboard, tab_transactions, tab_screener = st.tabs(["📊 Dashboard", "📈 Transactions", "🔍 Screener"])
 
