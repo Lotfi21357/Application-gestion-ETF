@@ -1,18 +1,21 @@
 # =============================================================================
-# COCKPIT DÉCISIONNEL BOURSIER v6.5 — "ALERTE QUANT & ALLOCATION"
+# COCKPIT DÉCISIONNEL BOURSIER v6.3 --- "ALERTE QUANT & ALLOCATION"
+# Lead Dev: Claude (Anthropic)
 # =============================================================================
-# v6.5 : Corrections majeures
-#   • PortfolioConfigManager.load_positions() garantit la présence des 5 ETF
-#     (WMMS.DE, DCAM.PA, MWRD.PA, KRW.PA, CHIP.PA) même si le fichier est incomplet
-#   • Screener : affiche désormais TOUS les ETFs de la bibliothèque (même ceux
-#     sans données historiques), avec score 0 et métriques N/A
-#   • Suppression du filtre if yf_ticker not in self.dm.data
-#   • Conservation de l'intégralité des fonctionnalités v6.4
+# v6.3 Corrections :
+#   • CORRECTIF : Screener gère les cas où df_scores est vide ou trop petit
+#   • CORRECTIF : get_weekly_performances essaie tous les tickers (yf + fallbacks)
+#   • CORRECTIF : wmms_gap calculé directement via dm.live avec fallback WMMS.XETRA
+#   • Conservation de toutes les fonctionnalités v6.2
+#
+# Requis (requirements.txt) :
+#   streamlit yfinance pandas numpy plotly PyGithub scipy requests_cache sqlalchemy tzdata
 # =============================================================================
 
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # MODULE 0 : IMPORTS & PAGE CONFIG
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -25,7 +28,7 @@ import json, os, sqlite3, io, csv, warnings
 from typing import Optional, Dict, List, Tuple
 import requests_cache
 from scipy import stats
-import ta
+import ta  # technical analysis library
 
 warnings.filterwarnings("ignore")
 
@@ -36,15 +39,16 @@ except ImportError:
     PYGITHUB_OK = False
 
 st.set_page_config(
-    page_title="Cockpit v6.5 · Alerte Quant & Allocation",
+    page_title="Cockpit v6.3 · Alerte Quant & Allocation",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # MODULE 1 : CSS
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600;700&display=swap');
@@ -86,390 +90,79 @@ section[data-testid="stSidebar"] { background-color: #22252E; border-right: 1px 
 </style>
 """, unsafe_allow_html=True)
 
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # MODULE 2 : CONSTANTES & CONFIGURATION
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 
+# Performance World forcée (données du 08/09/2026) - modifiable ici
 _FORCED_WORLD_PERF = 17.15  # en pourcentage
 
-# ---- ETF_UNIVERSE : tous les fonds disponibles sur Linxea Spirit 2 ----
-ETF_UNIVERSE = {
-    "CG1G.DE": {"isin": "FR0010655712", "name": "Amundi ETF DAX UCITS ETF DR", "category": "Germany"},
-    "AMEE.DE": {"isin": "FR0010930644", "name": "Amundi Global ETF Hydrogen UCITS ETF Acc", "category": "Hydrogen"},
-    "CAC.PA": {"isin": "FR0007052782", "name": "Amundi CAC 40 UCITS ETF Dist", "category": "France"},
-    "DJE.DE": {"isin": "FR0007056841", "name": "Amundi Dow Jones Industrial Average UCITS ETF Dist", "category": "USA"},
-    "WLD.PA": {"isin": "FR0010315770", "name": "Amundi MSCI World II UCITS ETF Dist", "category": "World"},
-    "LQQ.PA": {"isin": "FR0010342592", "name": "Amundi Nasdaq-100 Daily (2x) Leveraged UCITS ETF Acc", "category": "USA - Leveraged"},
-    "LVE.PA": {"isin": "FR0010468983", "name": "Amundi EURO STOXX 50 Daily (2x) Leveraged UCITS ETF Acc", "category": "Europe - Leveraged"},
-    "NRJ.PA": {"isin": "FR0010524777", "name": "Amundi MSCI New Energy UCITS ETF Dist", "category": "New Energy"},
-    "WAT.PA": {"isin": "FR0010527275", "name": "Amundi MSCI Water UCITS ETF Dist", "category": "Water"},
-    "LVC.PA": {"isin": "FR0010592014", "name": "Amundi CAC 40 Daily (2x) Leveraged UCITS ETF Acc", "category": "France - Leveraged"},
-    "CACC.PA": {"isin": "FR0013380607", "name": "Amundi CAC 40 UCITS ETF Acc", "category": "France"},
-    "WLDHC.PA": {"isin": "FR0014003N93", "name": "Amundi MSCI World Swap II UCITS ETF EUR Hedged Acc", "category": "World - Hedged"},
-    "LYPSG.DE": {"isin": "LU0496786574", "name": "Amundi S&P 500 II UCITS ETF EUR Dist", "category": "USA"},
-    "LYPD.DE": {"isin": "LU0533032859", "name": "Amundi MSCI World Financials UCITS ETF EUR Acc", "category": "World - Financials"},
-    "LYPE.DE": {"isin": "LU0533033238", "name": "Amundi MSCI World Health Care UCITS ETF EUR Acc", "category": "World - Healthcare"},
-    "LYPG.DE": {"isin": "LU0533033667", "name": "Amundi MSCI World Information Technology UCITS ETF EUR Acc", "category": "World - Technology"},
-    "LGQI.DE": {"isin": "LU0832436512", "name": "Amundi Global Equity Quality Income UCITS ETF Dist", "category": "World - Quality Income"},
-    "AM5H.DE": {"isin": "LU0959211326", "name": "Amundi Core S&P 500 Swap UCITS ETF EUR Hedged Acc", "category": "USA - Hedged"},
-    "LGWS.DE": {"isin": "LU1598690169", "name": "Lyxor MSCI EMU Value (DR) UCITS ETF", "category": "Europe - Value"},
-    "100H.DE": {"isin": "LU1650492330", "name": "Amundi FTSE 100 UCITS ETF EUR Hedged Acc", "category": "UK"},
-    "LCUA.DE": {"isin": "LU1781541849", "name": "Amundi MSCI EM Asia ESG Broad Transition UCITS ETF Acc", "category": "Emerging Asia"},
-    "LYBK.DE": {"isin": "LU1829219390", "name": "Amundi Euro Stoxx Banks UCITS ETF Acc", "category": "Europe - Banks"},
-    "LYMS.DE": {"isin": "LU1829221024", "name": "Amundi Nasdaq-100 II UCITS ETF Acc", "category": "USA - Technology"},
-    "LHTC.DE": {"isin": "LU1834986900", "name": "Amundi STOXX Europe 600 Healthcare UCITS ETF Acc", "category": "Europe - Healthcare"},
-    "LIGS.DE": {"isin": "LU1834987890", "name": "Amundi STOXX Europe 600 Industrials UCITS ETF Acc", "category": "Europe - Industrials"},
-    "LOGS.DE": {"isin": "LU1834988278", "name": "Amundi STOXX Europe 600 Energy Screened UCITS ETF Acc", "category": "Europe - Energy"},
-    "LTUG.DE": {"isin": "LU1834988518", "name": "Amundi STOXX Europe 600 Technology UCITS ETF Acc", "category": "Europe - Technology"},
-    "CHIP.PA": {"isin": "LU1900066033", "name": "Amundi MSCI Semiconductors UCITS ETF Acc", "category": "Semiconductors"},
-    "LBRAG.DE": {"isin": "LU1900066207", "name": "Amundi MSCI Brazil UCITS ETF Acc", "category": "Brazil"},
-    "KRW.PA": {"isin": "LU1900066975", "name": "Amundi MSCI Korea UCITS ETF Acc", "category": "South Korea"},
-    "LCHI.DE": {"isin": "LU1900068914", "name": "Amundi MSCI China ESG Selection Extra UCITS ETF Acc", "category": "China"},
-    "GEN1.DE": {"isin": "LU2023678449", "name": "Amundi MSCI Millennials UCITS ETF Acc", "category": "Thematic"},
-    "EBUY.DE": {"isin": "LU2023678878", "name": "Amundi MSCI Digital Economy UCITS ETF Acc", "category": "Digital Economy"},
-    "LYP6.DE": {"isin": "LU0908500753", "name": "Amundi Core Stoxx Europe 600 UCITS ETF Acc", "category": "Europe"},
-    "EPRA.DE": {"isin": "LU1437018838", "name": "Amundi IS FTSE EPRA NAREIT Global UCITS ETF", "category": "Real Estate"},
-    "UKSR.DE": {"isin": "LU1437025023", "name": "Amundi MSCI UK IMI SRI Climate Paris Aligned UCITS ETF DR - EUR (C)", "category": "UK - ESG"},
-    "J1GR.DE": {"isin": "LU1602144732", "name": "Amundi MSCI Japan ESG Broad Transition UCITS ETF EUR Acc", "category": "Japan"},
-    "18MM.DE": {"isin": "LU1602144906", "name": "Amundi MSCI Pacific Ex Japan SRI Climate Paris Aligned UCITS ETF DR-EUR (C)", "category": "Pacific"},
-    "RS2K.DE": {"isin": "LU1681038672", "name": "Amundi Russell 2000 UCITS ETF EUR (C)", "category": "USA - Small Cap"},
-    "REAL.DE": {"isin": "LU1681039480", "name": "Amundi FTSE EPRA Europe Real Estate UCITS ETF EUR (C)", "category": "Europe - Real Estate"},
-    "CI2.DE": {"isin": "LU1681043086", "name": "Amundi MSCI India UCITS ETF EUR (C)", "category": "India"},
-    "AMEW.DE": {"isin": "LU1681043599", "name": "Amundi MSCI World Swap UCITS ETF EUR Acc", "category": "World"},
-    "18MG.DE": {"isin": "LU1681043912", "name": "Amundi MSCI China Tech UCITS ETF EUR", "category": "China - Technology"},
-    "AMEA.DE": {"isin": "LU1681044480", "name": "Amundi MSCI EM Asia UCITS ETF EUR (C)", "category": "Emerging Asia"},
-    "CN1G.DE": {"isin": "LU1681044647", "name": "Amundi MSCI Nordic UCITS ETF EUR (C)", "category": "Nordic"},
-    "CSW.DE": {"isin": "LU1681044720", "name": "Amundi MSCI Switzerland UCITS ETF EUR (C)", "category": "Switzerland"},
-    "AMEL.DE": {"isin": "LU1681045024", "name": "Amundi MSCI EM Latin America UCITS ETF EUR (C)", "category": "Latin America"},
-    "AMEM.DE": {"isin": "LU1681045370", "name": "Amundi MSCI Emerging Markets UCITS ETF EUR (C)", "category": "Emerging Markets"},
-    "GC40.DE": {"isin": "LU1681046931", "name": "Amundi CAC 40 ESG UCITS ETF DR - EUR (C)", "category": "France - ESG"},
-    "C50.DE": {"isin": "LU1681047236", "name": "Amundi Core EURO STOXX 50 UCITS ETF Acc", "category": "Eurozone"},
-    "GLUX.DE": {"isin": "LU1681048630", "name": "Amundi Global Luxury UCITS ETF EUR (C)", "category": "Luxury"},
-    "AUM5.DE": {"isin": "LU1681048804", "name": "Amundi S&P 500 UCITS ETF EUR (C)", "category": "USA"},
-    "LBNK.DE": {"isin": "LU1834983477", "name": "Amundi STOXX Europe 600 Banks UCITS ETF Acc", "category": "Europe - Banks"},
-    "ROAI.DE": {"isin": "LU1861132840", "name": "Amundi MSCI Robotics & AI UCITS ETF Acc", "category": "Robotics & AI"},
-    "MUEU.DE": {"isin": "LU1861137484", "name": "Amundi MSCI Europe SRI Climate Paris Aligned UCITS ETF DR (C)", "category": "Europe - ESG"},
-    "MSED.DE": {"isin": "LU1861138961", "name": "Amundi MSCI Emerging Markets SRI Climate Paris Aligned UCITS ETF DR (C)", "category": "Emerging Markets - ESG"},
-    "SCITY.DE": {"isin": "LU2037748345", "name": "Amundi MSCI Smart Cities UCITS ETF Acc", "category": "Smart Cities"},
-    "ECR3.DE": {"isin": "LU2037748774", "name": "Amundi EUR Corporate Bond 0-3Y ESG UCITS ETF DR (C)", "category": "Euro Bonds"},
-    "CD91.DE": {"isin": "LU2611731824", "name": "Amundi NYSE ARCA GOLD BUGS UCITS ETF Dist", "category": "Gold Miners"},
-    "LCEU.DE": {"isin": "LU1377382368", "name": "BNP Paribas Easy Low Carbon 100 Europe PAB UCITS ETF", "category": "Europe - ESG"},
-    "ASRR.DE": {"isin": "LU1753045332", "name": "BNP Paribas Easy MSCI Europe SRI PAB UCITS ETF Capitalisation", "category": "Europe - ESG"},
-    "EMEC.DE": {"isin": "LU1953136527", "name": "BNP Paribas Easy ECPI Circular Economy Leaders UCITS ETF Cap", "category": "Circular Economy"},
-    "BJLE.DE": {"isin": "LU2194447293", "name": "BNP Paribas Easy ECPI Global ESG Blue Economy UCITS ETF Cap", "category": "Blue Economy"},
-    "IQQI.DE": {"isin": "IE00B1FZS467", "name": "iShares Global Infrastructure UCITS ETF USD Dist", "category": "Infrastructure"},
-    "IUSC.DE": {"isin": "IE00B27YCK28", "name": "iShares MSCI EM Latin America UCITS ETF USD Dist", "category": "Latin America"},
-    "IUSD.DE": {"isin": "IE00B27YCN58", "name": "iShares MSCI World Islamic UCITS ETF USD Dist", "category": "World - Islamic"},
-    "EUNK.DE": {"isin": "IE00B4K48X80", "name": "iShares Core MSCI Europe UCITS ETF EUR Acc", "category": "Europe"},
-    "IBC6.DE": {"isin": "IE00B5377D42", "name": "iShares MSCI Australia UCITS ETF USD Acc", "category": "Australia"},
-    "2B72.DE": {"isin": "IE00BF20LF40", "name": "iShares MSCI Europe Mid Cap UCITS ETF EUR Acc", "category": "Europe - Mid Cap"},
-    "L0CK.DE": {"isin": "IE00BG0J4C88", "name": "iShares Digital Security UCITS ETF USD Acc", "category": "Cybersecurity"},
-    "IEVD.DE": {"isin": "IE00BGL86Z12", "name": "iShares Electric Vehicles and Driving Technology UCITS ETF USD Acc", "category": "Electric Vehicles"},
-    "IWLE.DE": {"isin": "IE00BKBF6H24", "name": "iShares Core MSCI World ETF EUR H Dist", "category": "World - Hedged"},
-    "2B7K.DE": {"isin": "IE00BYX2JD69", "name": "iShares MSCI World SRI UCITS ETF EUR Acc", "category": "World - ESG"},
-    "2B76.DE": {"isin": "IE00BYZK4552", "name": "iShares Automation & Robotics UCITS ETF", "category": "Automation & Robotics"},
-    "2B77.DE": {"isin": "IE00BYZK4669", "name": "iShares Ageing Population UCITS ETF USD Acc", "category": "Demographics"},
-    "2B78.DE": {"isin": "IE00BYZK4776", "name": "iShares Healthcare Innovation UCITS ETF USD Acc", "category": "Healthcare"},
-    "2B79.DE": {"isin": "IE00BYZK4883", "name": "iShares Digitalisation UCITS ETF USD Acc", "category": "Digitalisation"},
-    "XAIX.DE": {"isin": "IE00BGV5VN51", "name": "Xtrackers Artificial Intelligence & Big Data UCITS ETF 1C", "category": "Artificial Intelligence"},
-    "WMMS.DE": {"isin": "IE000AZV0AS3", "name": "Amundi MSCI World IMI Value Advanced UCITS ETF Acc", "category": "World - Value"},
-    "USTH.PA": {"isin": "LU1954152853", "name": "Amundi Nasdaq-100 II UCITS ETF EUR Hedged Acc", "category": "USA - Technology - Hedged"},
+ETF_LIBRARY: Dict[str, Dict] = {
+    "WMMS.XETRA": {"nom": "Amundi MSCI World IMI Value Screened", "name": "Amundi MSCI World IMI Value Screened Factor", "yf": "WMMS.DE", "yf_fallbacks": ["WMMS.XETRA"], "category": "Core", "theme": "Value", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.37},
+    "DCAM.PA": {"nom": "MSCI World PEA", "name": "Amundi MSCI World UCITS PEA", "yf": "DCAM.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "PEA", "initial_target": 0.183},
+    "MWRD.PA": {"nom": "MSCI World AV", "name": "Amundi MSCI World UCITS DR USD", "yf": "MWRD.PA", "yf_fallbacks": ["IWDA.AS", "EUNL.DE"], "category": "Core", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.154},
+    "KRW.PA": {"nom": "MSCI Korea", "name": "Amundi MSCI Korea UCITS", "yf": "KRW.PA", "yf_fallbacks": [], "category": "Satellite", "theme": "Korea", "region": "Asia", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.155},
+    "CHIP.PA": {"nom": "MSCI Semiconductors", "name": "Amundi MSCI Semiconductors UCITS", "yf": "CHIP.PA", "yf_fallbacks": [], "category": "Satellite", "theme": "Tech", "region": "Global", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.138},
+    # Nouveaux ETF à analyser
+    "LYXTNOW.PA": {"nom": "World Info Tech", "name": "Amundi MSCI World Information Technology", "yf": "LYXTNOW.PA", "yf_fallbacks": [], "category": "Sector", "theme": "Tech", "region": "Global", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "IJPE.PA": {"nom": "Japan Small Cap", "name": "iShares MSCI Japan Small Cap Acc", "yf": "IJPE.PA", "yf_fallbacks": [], "category": "Core", "theme": "Small Cap", "region": "Japan", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "CV9.PA": {"nom": "Europe Value", "name": "Amundi MSCI Europe Value Factor", "yf": "CV9.PA", "yf_fallbacks": [], "category": "Factor", "theme": "Value", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "LYXFINW.PA": {"nom": "World Financials", "name": "Amundi MSCI World Financials UCITS", "yf": "LYXFINW.PA", "yf_fallbacks": [], "category": "Sector", "theme": "Finance", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    # Catalogue élargi (conservé)
+    "500.PA": {"nom": "Amundi S&P 500", "name": "Amundi S&P 500 UCITS", "yf": "500.PA", "yf_fallbacks": [], "category": "Core", "theme": "Large Cap", "region": "USA", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "USTE.PA": {"nom": "Nasdaq-100", "name": "Lyxor UCITS Nasdaq-100 D-EUR", "yf": "USTE.PA", "yf_fallbacks": [], "category": "Core", "theme": "Tech", "region": "USA", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "CW8.PA": {"nom": "MSCI World CW8", "name": "Amundi MSCI World UCITS", "yf": "CW8.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "LYXHEA.PA": {"nom": "Europe Healthcare", "name": "Amundi STOXX Europe 600 Healthcare", "yf": "LYXHEA.PA", "yf_fallbacks": [], "category": "Sector", "theme": "Health", "region": "Europe", "risk_type": "Defensive", "enveloppe": "AV", "initial_target": 0.0},
+    "SPHC.PA": {"nom": "S&P 500 Hedged", "name": "Lyxor S&P 500 UCITS - Daily Hedged", "yf": "SPHC.PA", "yf_fallbacks": [], "category": "Core", "theme": "Large Cap", "region": "USA", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "WSRI.PA": {"nom": "World SRI", "name": "Amundi MSCI World SRI Climate Net", "yf": "WSRI.PA", "yf_fallbacks": [], "category": "ESG", "theme": "Sustainability", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "USTH.PA": {"nom": "Nasdaq Hedged", "name": "MULTI UNITS LUXEMBOURG - Lyxor Nasdaq Hedged", "yf": "USTH.PA", "yf_fallbacks": [], "category": "Core", "theme": "Tech", "region": "USA", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "ISEUMD.PA": {"nom": "Europe Mid Cap", "name": "iShares MSCI Europe Mid Cap Acc", "yf": "ISEUMD.PA", "yf_fallbacks": [], "category": "Core", "theme": "Mid Cap", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "ALAT.PA": {"nom": "EM Latin America", "name": "Amundi MSCI EM Latin America UCITS", "yf": "ALAT.PA", "yf_fallbacks": [], "category": "Emerging", "theme": "Commodities", "region": "LatAm", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "INDG.PA": {"nom": "Europe Industrials", "name": "Amundi STOXX Europe 600 Industrials", "yf": "INDG.PA", "yf_fallbacks": [], "category": "Sector", "theme": "Industrial", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "DJE.PA": {"nom": "Dow Jones", "name": "Amundi Dow Jones Industrial Average", "yf": "DJE.PA", "yf_fallbacks": [], "category": "Core", "theme": "Value", "region": "USA", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "NRAM.PA": {"nom": "North America ESG", "name": "AMUNDI MSCI North America ESG", "yf": "NRAM.PA", "yf_fallbacks": [], "category": "ESG", "theme": "Sustainability", "region": "NorthAmerica", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "GOAI.PA": {"nom": "Global AI", "name": "Amundi Stoxx Global Artificial Intelligence", "yf": "GOAI.PA", "yf_fallbacks": [], "category": "Satellite", "theme": "AI & Tech", "region": "Global", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "ENRGA.PA": {"nom": "Europe Energy", "name": "Amundi STOXX Europe 600 Energy", "yf": "ENRGA.PA", "yf_fallbacks": [], "category": "Sector", "theme": "Energy", "region": "Europe", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "JPNH.PA": {"nom": "Japan TOPIX", "name": "Amundi Japan TOPIX II UCITS EUR", "yf": "JPNH.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Japan", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "CSW.PA": {"nom": "Switzerland", "name": "Amundi ETF MSCI Switzerland UCITS", "yf": "CSW.PA", "yf_fallbacks": [], "category": "Core", "theme": "Defensive", "region": "Switzerland", "risk_type": "Defensive", "enveloppe": "AV", "initial_target": 0.0},
+    "CD9.PA": {"nom": "Europe High Dividend", "name": "Amundi MSCI Europe High Dividend", "yf": "CD9.PA", "yf_fallbacks": [], "category": "Factor", "theme": "Dividend", "region": "Europe", "risk_type": "Defensive", "enveloppe": "AV", "initial_target": 0.0},
+    "CJ1.PA": {"nom": "Japan MSCI", "name": "Amundi ETF MSCI Japan UCITS", "yf": "CJ1.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Japan", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "USRI.PA": {"nom": "USA SRI", "name": "AMUNDI MSCI USA SRI Climate Net", "yf": "USRI.PA", "yf_fallbacks": [], "category": "ESG", "theme": "Sustainability", "region": "USA", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "EBUY.PA": {"nom": "Digital Economy", "name": "Lyxor MSCI Digital", "yf": "EBUY.PA", "yf_fallbacks": [], "category": "Satellite", "theme": "Digital Economy", "region": "Global", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "COMO.PA": {"nom": "Commodities", "name": "Lyxor UCITS Commodities Thomson", "yf": "COMO.PA", "yf_fallbacks": [], "category": "Alternative", "theme": "Commodities", "region": "Global", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "CP9.PA": {"nom": "Pacific Ex Japan", "name": "Amundi ETF MSCI Pacific Ex Japan", "yf": "CP9.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Pacific", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "ESGWO.PA": {"nom": "World ESG Leaders", "name": "Amundi MSCI World ESG Leaders U", "yf": "ESGWO.PA", "yf_fallbacks": [], "category": "ESG", "theme": "Sustainability", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "IUSN.DE": {"nom": "World Small Cap", "name": "iShares MSCI World Small Cap UCITS", "yf": "IUSN.DE", "yf_fallbacks": [], "category": "Core", "theme": "Small Cap", "region": "Global", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "WLDHC.PA": {"nom": "World Monthly Hedged", "name": "Lyxor MSCI World UCITS Monthly Hedged", "yf": "WLDHC.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "ESCE.PA": {"nom": "EMU Small Cap", "name": "UBS ETF MSCI EMU Small Cap UCITS", "yf": "ESCE.PA", "yf_fallbacks": [], "category": "Core", "theme": "Small Cap", "region": "Europe", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "2B78.DE": {"nom": "Healthcare Innovation", "name": "iShares Healthcare Innovation Acc", "yf": "2B78.DE", "yf_fallbacks": [], "category": "Satellite", "theme": "Health Tech", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "CACC.PA": {"nom": "CAC 40", "name": "Lyxor CAC 40 (DR) UCITS Acc", "yf": "CACC.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "France", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "CN1.PA": {"nom": "Nordic", "name": "Amundi ETF MSCI Nordic UCITS", "yf": "CN1.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Nordic", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "LYXRIO.PA": {"nom": "Brazil", "name": "Amundi MSCI Brazil UCITS ETF Acc", "yf": "LYXRIO.PA", "yf_fallbacks": [], "category": "Emerging", "theme": "Blended", "region": "Brazil", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "C50.PA": {"nom": "Euro Stoxx 50", "name": "Amundi ETF Euro Stoxx 50 UCITS", "yf": "C50.PA", "yf_fallbacks": [], "category": "Core", "theme": "Large Cap", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "SMEA.PA": {"nom": "MSCI Europe", "name": "iShares MSCI Europe UCITS Acc", "yf": "SMEA.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "VEUR.PA": {"nom": "FTSE Developed Europe", "name": "Vanguard FTSE Developed Europe", "yf": "VEUR.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "MSE.PA": {"nom": "EURO STOXX 50", "name": "Amundi EURO STOXX 50 II UCITS Acc", "yf": "MSE.PA", "yf_fallbacks": [], "category": "Core", "theme": "Large Cap", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "100H.PA": {"nom": "FTSE 100 Hedged", "name": "Lyxor FTSE 100 Monthly Hedged C", "yf": "100H.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "UK", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "CC1U.PA": {"nom": "MSCI China", "name": "Amundi ETF MSCI China UCITS", "yf": "CC1U.PA", "yf_fallbacks": [], "category": "Emerging", "theme": "Blended", "region": "China", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "LYXDAX.PA": {"nom": "DAX", "name": "Lyxor DAX (DR) UCITS - Acc", "yf": "LYXDAX.PA", "yf_fallbacks": [], "category": "Core", "theme": "Large Cap", "region": "Germany", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "CMUD.PA": {"nom": "EMU ESG", "name": "Amundi MSCI EMU ESG Selection", "yf": "CMUD.PA", "yf_fallbacks": [], "category": "ESG", "theme": "Sustainability", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "AMCNEG.PA": {"nom": "China ESG", "name": "Amundi MSCI China ESG Leaders Sel", "yf": "AMCNEG.PA", "yf_fallbacks": [], "category": "ESG", "theme": "Sustainability", "region": "China", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "CMU.PA": {"nom": "MSCI EMU", "name": "Amundi MSCI EMU UCITS", "yf": "CMU.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "LYNRJ.PA": {"nom": "New Energy", "name": "Lyxor New Energy UCITS ETF Dist", "yf": "LYNRJ.PA", "yf_fallbacks": [], "category": "Satellite", "theme": "Clean Energy", "region": "Global", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "SCITY.PA": {"nom": "Smart City", "name": "Amundi Index Solutions - Amundi Smart City", "yf": "SCITY.PA", "yf_fallbacks": [], "category": "Satellite", "theme": "Megatrend", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "RS2U.PA": {"nom": "Resilient", "name": "Amundi Index Solutions - Amundi Resilient", "yf": "RS2U.PA", "yf_fallbacks": [], "category": "Factor", "theme": "Defensive", "region": "Europe", "risk_type": "Defensive", "enveloppe": "AV", "initial_target": 0.0},
+    "EUDF.PA": {"nom": "Europe Defence", "name": "WisdomTree Europe Defence UCITS", "yf": "EUDF.PA", "yf_fallbacks": [], "category": "Satellite", "theme": "Defense", "region": "Europe", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
+    "AEEM.PA": {"nom": "MSCI EM", "name": "Amundi ETF MSCI Emerging Markets", "yf": "AEEM.PA", "yf_fallbacks": [], "category": "Emerging", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "LYXLEM.PA": {"nom": "MSCI EM Swap", "name": "Amundi MSCI Em Mkts Swap II UCIT", "yf": "LYXLEM.PA", "yf_fallbacks": [], "category": "Emerging", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
+    "AUEM.PA": {"nom": "MSCI EM USD", "name": "Amundi ETF MSCI Emerging Markets USD", "yf": "AUEM.PA", "yf_fallbacks": [], "category": "Emerging", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
 }
 
-# ---- EXISTING_ETFS : fonds détenus ou suivis (avec initial_target, etc.) ----
-EXISTING_ETFS = {
-    "DCAM.PA": {
-        "isin": "LU1900066033",
-        "nom": "MSCI World PEA",
-        "name": "Amundi MSCI World UCITS PEA",
-        "yf": "DCAM.PA",
-        "yf_fallbacks": [],
-        "category": "Core",
-        "theme": "Blended",
-        "region": "Global",
-        "risk_type": "Standard",
-        "enveloppe": "PEA",
-        "initial_target": 0.183
-    },
-    "MWRD.PA": {
-        "isin": "LU1900066975",
-        "nom": "MSCI World AV",
-        "name": "Amundi MSCI World UCITS DR USD",
-        "yf": "MWRD.PA",
-        "yf_fallbacks": ["IWDA.AS", "EUNL.DE"],
-        "category": "Core",
-        "theme": "Blended",
-        "region": "Global",
-        "risk_type": "Standard",
-        "enveloppe": "AV",
-        "initial_target": 0.154
-    },
-    "KRW.PA": {
-        "isin": "LU1900066975",
-        "nom": "MSCI Korea",
-        "name": "Amundi MSCI Korea UCITS",
-        "yf": "KRW.PA",
-        "yf_fallbacks": [],
-        "category": "Satellite",
-        "theme": "Korea",
-        "region": "Asia",
-        "risk_type": "HighVol",
-        "enveloppe": "AV",
-        "initial_target": 0.155
-    },
-    "CHIP.PA": {
-        "isin": "LU1900066033",
-        "nom": "MSCI Semiconductors",
-        "name": "Amundi MSCI Semiconductors UCITS",
-        "yf": "CHIP.PA",
-        "yf_fallbacks": [],
-        "category": "Satellite",
-        "theme": "Tech",
-        "region": "Global",
-        "risk_type": "HighVol",
-        "enveloppe": "AV",
-        "initial_target": 0.138
-    },
-    "WMMS.DE": {
-        "isin": "IE000AZV0AS3",
-        "nom": "Amundi MSCI World IMI Value Advanced",
-        "name": "Amundi MSCI World IMI Value Advanced UCITS ETF Acc",
-        "yf": "WMMS.DE",
-        "yf_fallbacks": [],
-        "category": "Core",
-        "theme": "Value",
-        "region": "Global",
-        "risk_type": "Standard",
-        "enveloppe": "AV",
-        "initial_target": 0.37
-    },
-    "500.PA": {"isin": "LU1681048804", "nom": "Amundi S&P 500", "name": "Amundi S&P 500 UCITS", "yf": "500.PA", "yf_fallbacks": [], "category": "Core", "theme": "Large Cap", "region": "USA", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "USTE.PA": {"isin": "LU1829221024", "nom": "Nasdaq-100", "name": "Lyxor UCITS Nasdaq-100 D-EUR", "yf": "USTE.PA", "yf_fallbacks": [], "category": "Core", "theme": "Tech", "region": "USA", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
-    "CW8.PA": {"isin": "LU1681043599", "nom": "MSCI World CW8", "name": "Amundi MSCI World UCITS", "yf": "CW8.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "LYXHEA.PA": {"isin": "LU1834986900", "nom": "Europe Healthcare", "name": "Amundi STOXX Europe 600 Healthcare", "yf": "LYXHEA.PA", "yf_fallbacks": [], "category": "Sector", "theme": "Health", "region": "Europe", "risk_type": "Defensive", "enveloppe": "AV", "initial_target": 0.0},
-    "SPHC.PA": {"isin": "LU0959211326", "nom": "S&P 500 Hedged", "name": "Lyxor S&P 500 UCITS - Daily Hedged", "yf": "SPHC.PA", "yf_fallbacks": [], "category": "Core", "theme": "Large Cap", "region": "USA", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "WSRI.PA": {"isin": "IE00BYX2JD69", "nom": "World SRI", "name": "Amundi MSCI World SRI Climate Net", "yf": "WSRI.PA", "yf_fallbacks": [], "category": "ESG", "theme": "Sustainability", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "USTH.PA": {"isin": "LU1954152853", "nom": "Nasdaq Hedged", "name": "Amundi Nasdaq-100 II UCITS ETF EUR Hedged Acc", "yf": "USTH.PA", "yf_fallbacks": [], "category": "Core", "theme": "Tech", "region": "USA", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
-    "ISEUMD.PA": {"isin": "IE00BF20LF40", "nom": "Europe Mid Cap", "name": "iShares MSCI Europe Mid Cap Acc", "yf": "ISEUMD.PA", "yf_fallbacks": [], "category": "Core", "theme": "Mid Cap", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "ALAT.PA": {"isin": "LU1681045024", "nom": "EM Latin America", "name": "Amundi MSCI EM Latin America UCITS", "yf": "ALAT.PA", "yf_fallbacks": [], "category": "Emerging", "theme": "Commodities", "region": "LatAm", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
-    "INDG.PA": {"isin": "LU1834987890", "nom": "Europe Industrials", "name": "Amundi STOXX Europe 600 Industrials", "yf": "INDG.PA", "yf_fallbacks": [], "category": "Sector", "theme": "Industrial", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "DJE.PA": {"isin": "FR0007056841", "nom": "Dow Jones", "name": "Amundi Dow Jones Industrial Average", "yf": "DJE.PA", "yf_fallbacks": [], "category": "Core", "theme": "Value", "region": "USA", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "NRAM.PA": {"isin": "", "nom": "North America ESG", "name": "AMUNDI MSCI North America ESG", "yf": "NRAM.PA", "yf_fallbacks": [], "category": "ESG", "theme": "Sustainability", "region": "NorthAmerica", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "GOAI.PA": {"isin": "", "nom": "Global AI", "name": "Amundi Stoxx Global Artificial Intelligence", "yf": "GOAI.PA", "yf_fallbacks": [], "category": "Satellite", "theme": "AI & Tech", "region": "Global", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
-    "ENRGA.PA": {"isin": "LU1834988278", "nom": "Europe Energy", "name": "Amundi STOXX Europe 600 Energy", "yf": "ENRGA.PA", "yf_fallbacks": [], "category": "Sector", "theme": "Energy", "region": "Europe", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
-    "JPNH.PA": {"isin": "LU1602144732", "nom": "Japan TOPIX", "name": "Amundi Japan TOPIX II UCITS EUR", "yf": "JPNH.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Japan", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "CSW.PA": {"isin": "LU1681044720", "nom": "Switzerland", "name": "Amundi ETF MSCI Switzerland UCITS", "yf": "CSW.PA", "yf_fallbacks": [], "category": "Core", "theme": "Defensive", "region": "Switzerland", "risk_type": "Defensive", "enveloppe": "AV", "initial_target": 0.0},
-    "CD9.PA": {"isin": "", "nom": "Europe High Dividend", "name": "Amundi MSCI Europe High Dividend", "yf": "CD9.PA", "yf_fallbacks": [], "category": "Factor", "theme": "Dividend", "region": "Europe", "risk_type": "Defensive", "enveloppe": "AV", "initial_target": 0.0},
-    "CJ1.PA": {"isin": "", "nom": "Japan MSCI", "name": "Amundi ETF MSCI Japan UCITS", "yf": "CJ1.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Japan", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "USRI.PA": {"isin": "", "nom": "USA SRI", "name": "AMUNDI MSCI USA SRI Climate Net", "yf": "USRI.PA", "yf_fallbacks": [], "category": "ESG", "theme": "Sustainability", "region": "USA", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "EBUY.PA": {"isin": "LU2023678878", "nom": "Digital Economy", "name": "Lyxor MSCI Digital", "yf": "EBUY.PA", "yf_fallbacks": [], "category": "Satellite", "theme": "Digital Economy", "region": "Global", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
-    "COMO.PA": {"isin": "", "nom": "Commodities", "name": "Lyxor UCITS Commodities Thomson", "yf": "COMO.PA", "yf_fallbacks": [], "category": "Alternative", "theme": "Commodities", "region": "Global", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
-    "CP9.PA": {"isin": "LU1602144906", "nom": "Pacific Ex Japan", "name": "Amundi ETF MSCI Pacific Ex Japan", "yf": "CP9.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Pacific", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "ESGWO.PA": {"isin": "", "nom": "World ESG Leaders", "name": "Amundi MSCI World ESG Leaders U", "yf": "ESGWO.PA", "yf_fallbacks": [], "category": "ESG", "theme": "Sustainability", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "IUSN.DE": {"isin": "IE00B3F81R35", "nom": "World Small Cap", "name": "iShares MSCI World Small Cap UCITS", "yf": "IUSN.DE", "yf_fallbacks": [], "category": "Core", "theme": "Small Cap", "region": "Global", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
-    "WLDHC.PA": {"isin": "FR0014003N93", "nom": "World Monthly Hedged", "name": "Lyxor MSCI World UCITS Monthly Hedged", "yf": "WLDHC.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "ESCE.PA": {"isin": "", "nom": "EMU Small Cap", "name": "UBS ETF MSCI EMU Small Cap UCITS", "yf": "ESCE.PA", "yf_fallbacks": [], "category": "Core", "theme": "Small Cap", "region": "Europe", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
-    "2B78.DE": {"isin": "IE00BYZK4776", "nom": "Healthcare Innovation", "name": "iShares Healthcare Innovation Acc", "yf": "2B78.DE", "yf_fallbacks": [], "category": "Satellite", "theme": "Health Tech", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "CACC.PA": {"isin": "FR0013380607", "nom": "CAC 40", "name": "Lyxor CAC 40 (DR) UCITS Acc", "yf": "CACC.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "France", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "CN1.PA": {"isin": "LU1681044647", "nom": "Nordic", "name": "Amundi ETF MSCI Nordic UCITS", "yf": "CN1.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Nordic", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "LYXRIO.PA": {"isin": "LU1900066207", "nom": "Brazil", "name": "Amundi MSCI Brazil UCITS ETF Acc", "yf": "LYXRIO.PA", "yf_fallbacks": [], "category": "Emerging", "theme": "Blended", "region": "Brazil", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
-    "C50.PA": {"isin": "LU1681047236", "nom": "Euro Stoxx 50", "name": "Amundi ETF Euro Stoxx 50 UCITS", "yf": "C50.PA", "yf_fallbacks": [], "category": "Core", "theme": "Large Cap", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "SMEA.PA": {"isin": "IE00B4K48X80", "nom": "MSCI Europe", "name": "iShares MSCI Europe UCITS Acc", "yf": "SMEA.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "VEUR.PA": {"isin": "IE00B945VV12", "nom": "FTSE Developed Europe", "name": "Vanguard FTSE Developed Europe", "yf": "VEUR.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "MSE.PA": {"isin": "", "nom": "EURO STOXX 50", "name": "Amundi EURO STOXX 50 II UCITS Acc", "yf": "MSE.PA", "yf_fallbacks": [], "category": "Core", "theme": "Large Cap", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "100H.PA": {"isin": "LU1650492330", "nom": "FTSE 100 Hedged", "name": "Lyxor FTSE 100 Monthly Hedged C", "yf": "100H.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "UK", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "CC1U.PA": {"isin": "LU1900068914", "nom": "MSCI China", "name": "Amundi ETF MSCI China UCITS", "yf": "CC1U.PA", "yf_fallbacks": [], "category": "Emerging", "theme": "Blended", "region": "China", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
-    "LYXDAX.PA": {"isin": "FR0010655712", "nom": "DAX", "name": "Lyxor DAX (DR) UCITS - Acc", "yf": "LYXDAX.PA", "yf_fallbacks": [], "category": "Core", "theme": "Large Cap", "region": "Germany", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "CMUD.PA": {"isin": "", "nom": "EMU ESG", "name": "Amundi MSCI EMU ESG Selection", "yf": "CMUD.PA", "yf_fallbacks": [], "category": "ESG", "theme": "Sustainability", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "AMCNEG.PA": {"isin": "LU1900068914", "nom": "China ESG", "name": "Amundi MSCI China ESG Leaders Sel", "yf": "AMCNEG.PA", "yf_fallbacks": [], "category": "ESG", "theme": "Sustainability", "region": "China", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
-    "CMU.PA": {"isin": "", "nom": "MSCI EMU", "name": "Amundi MSCI EMU UCITS", "yf": "CMU.PA", "yf_fallbacks": [], "category": "Core", "theme": "Blended", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "LYNRJ.PA": {"isin": "LU1900066207", "nom": "New Energy", "name": "Lyxor New Energy UCITS ETF Dist", "yf": "LYNRJ.PA", "yf_fallbacks": [], "category": "Satellite", "theme": "Clean Energy", "region": "Global", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
-    "SCITY.PA": {"isin": "LU2037748345", "nom": "Smart City", "name": "Amundi Index Solutions - Amundi Smart City", "yf": "SCITY.PA", "yf_fallbacks": [], "category": "Satellite", "theme": "Megatrend", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "RS2U.PA": {"isin": "", "nom": "Resilient", "name": "Amundi Index Solutions - Amundi Resilient", "yf": "RS2U.PA", "yf_fallbacks": [], "category": "Factor", "theme": "Defensive", "region": "Europe", "risk_type": "Defensive", "enveloppe": "AV", "initial_target": 0.0},
-    "EUDF.PA": {"isin": "", "nom": "Europe Defence", "name": "WisdomTree Europe Defence UCITS", "yf": "EUDF.PA", "yf_fallbacks": [], "category": "Satellite", "theme": "Defense", "region": "Europe", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
-    "AEEM.PA": {"isin": "LU1681045370", "nom": "MSCI EM", "name": "Amundi ETF MSCI Emerging Markets", "yf": "AEEM.PA", "yf_fallbacks": [], "category": "Emerging", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "LYXLEM.PA": {"isin": "LU1681045370", "nom": "MSCI EM Swap", "name": "Amundi MSCI Em Mkts Swap II UCIT", "yf": "LYXLEM.PA", "yf_fallbacks": [], "category": "Emerging", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "AUEM.PA": {"isin": "LU1681045370", "nom": "MSCI EM USD", "name": "Amundi ETF MSCI Emerging Markets USD", "yf": "AUEM.PA", "yf_fallbacks": [], "category": "Emerging", "theme": "Blended", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "LYXTNOW.PA": {"isin": "LU0533033667", "nom": "World Info Tech", "name": "Amundi MSCI World Information Technology", "yf": "LYXTNOW.PA", "yf_fallbacks": [], "category": "Sector", "theme": "Tech", "region": "Global", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
-    "IJPE.PA": {"isin": "IE00B4K48X80", "nom": "Japan Small Cap", "name": "iShares MSCI Japan Small Cap Acc", "yf": "IJPE.PA", "yf_fallbacks": [], "category": "Core", "theme": "Small Cap", "region": "Japan", "risk_type": "HighVol", "enveloppe": "AV", "initial_target": 0.0},
-    "CV9.PA": {"isin": "", "nom": "Europe Value", "name": "Amundi MSCI Europe Value Factor", "yf": "CV9.PA", "yf_fallbacks": [], "category": "Factor", "theme": "Value", "region": "Europe", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-    "LYXFINW.PA": {"isin": "LU0533032859", "nom": "World Financials", "name": "Amundi MSCI World Financials UCITS", "yf": "LYXFINW.PA", "yf_fallbacks": [], "category": "Sector", "theme": "Finance", "region": "Global", "risk_type": "Standard", "enveloppe": "AV", "initial_target": 0.0},
-}
+# Ajout des tickers pour les actions World (afin d'éviter les N/A)
+WORLD_STOCKS_TICKERS = ["NVDA", "AAPL", "GOOGL", "GOOG", "MSFT", "AMZN"]
 
-# ---- Fonctions d'inférence améliorées ----
-def infer_region(category: str) -> str:
-    cat_lower = category.lower()
-    if any(x in cat_lower for x in ["world", "global", "international", "developed"]):
-        return "Global"
-    if any(x in cat_lower for x in ["usa", "nasdaq", "sp500", "s&p 500", "america"]):
-        return "USA"
-    if "europe" in cat_lower or "euro" in cat_lower or "stoxx" in cat_lower or "emu" in cat_lower:
-        return "Europe"
-    if "france" in cat_lower or "cac" in cat_lower:
-        return "France"
-    if "germany" in cat_lower or "dax" in cat_lower:
-        return "Germany"
-    if "uk" in cat_lower or "ftse 100" in cat_lower:
-        return "UK"
-    if "japan" in cat_lower:
-        return "Japan"
-    if "china" in cat_lower:
-        return "China"
-    if "korea" in cat_lower:
-        return "South Korea"
-    if "india" in cat_lower:
-        return "India"
-    if "brazil" in cat_lower:
-        return "Brazil"
-    if "latin america" in cat_lower:
-        return "LatAm"
-    if "pacific" in cat_lower:
-        return "Pacific"
-    if "emerging" in cat_lower:
-        return "Emerging"
-    if "switzerland" in cat_lower:
-        return "Switzerland"
-    if "nordic" in cat_lower:
-        return "Nordic"
-    if "australia" in cat_lower:
-        return "Australia"
-    return "Global"
-
-def infer_theme(category: str) -> str:
-    cat_lower = category.lower()
-    if "semiconductor" in cat_lower:
-        return "Semiconductors"
-    if "robotics" in cat_lower or "ai" in cat_lower or "artificial intelligence" in cat_lower:
-        return "Robotics & AI"
-    if "cybersecurity" in cat_lower or "security" in cat_lower:
-        return "Cybersecurity"
-    if "automation" in cat_lower:
-        return "Automation"
-    if "digital economy" in cat_lower:
-        return "Digital Economy"
-    if "digitalisation" in cat_lower:
-        return "Digitalisation"
-    if "electric vehicle" in cat_lower or "ev" in cat_lower:
-        return "Electric Vehicles"
-    if "hydrogen" in cat_lower:
-        return "Hydrogen"
-    if "water" in cat_lower:
-        return "Water"
-    if "smart city" in cat_lower or "smart cities" in cat_lower:
-        return "Smart Cities"
-    if "luxury" in cat_lower:
-        return "Luxury"
-    if "circular economy" in cat_lower:
-        return "Circular Economy"
-    if "blue economy" in cat_lower:
-        return "Blue Economy"
-    if "clean energy" in cat_lower or "new energy" in cat_lower:
-        return "Clean Energy"
-    if "gold" in cat_lower or "gold miners" in cat_lower:
-        return "Gold"
-    if "real estate" in cat_lower or "epra" in cat_lower:
-        return "Real Estate"
-    if "infrastructure" in cat_lower:
-        return "Infrastructure"
-    if "banks" in cat_lower:
-        return "Banks"
-    if "healthcare" in cat_lower:
-        return "Healthcare"
-    if "financial" in cat_lower:
-        return "Finance"
-    if "technology" in cat_lower:
-        return "Technology"
-    if "energy" in cat_lower:
-        return "Energy"
-    if "industrial" in cat_lower:
-        return "Industrials"
-    if "consumer" in cat_lower or "millennials" in cat_lower:
-        return "Consumer"
-    if "quality income" in cat_lower:
-        return "Quality Income"
-    if "dividend" in cat_lower:
-        return "Dividend"
-    if "value" in cat_lower:
-        return "Value"
-    if "growth" in cat_lower:
-        return "Growth"
-    if "small cap" in cat_lower:
-        return "Small Cap"
-    if "mid cap" in cat_lower:
-        return "Mid Cap"
-    if "large cap" in cat_lower:
-        return "Large Cap"
-    if "esg" in cat_lower or "sri" in cat_lower or "climate" in cat_lower:
-        return "Sustainability"
-    if "hedged" in cat_lower:
-        return "Hedged"
-    if "leveraged" in cat_lower:
-        return "Leveraged"
-    if "islamic" in cat_lower:
-        return "Islamic"
-    return "Blended"
-
-# ---- Normalisation par ISIN ----
-def normalize_etf_library(library: Dict) -> Dict:
-    by_isin = {}
-    for ticker, meta in library.items():
-        isin = meta.get("isin")
-        if not isin:
-            by_isin[ticker] = {"ticker": ticker, "meta": meta}
-            continue
-        if isin not in by_isin:
-            by_isin[isin] = {"ticker": ticker, "meta": meta}
-        else:
-            current = by_isin[isin]
-            if ticker.endswith(".DE") and not current["ticker"].endswith(".DE"):
-                current["ticker"] = ticker
-                current["meta"] = meta
-    result = {}
-    for isin_or_ticker, entry in by_isin.items():
-        ticker = entry["ticker"]
-        meta = entry["meta"].copy()
-        if "isin" not in meta and (isin_or_ticker.startswith("IE") or isin_or_ticker.startswith("FR") or isin_or_ticker.startswith("LU")):
-            meta["isin"] = isin_or_ticker
-        result[ticker] = meta
-    return result
-
-# ---- Construction de ETF_LIBRARY ----
-temp_library = dict(EXISTING_ETFS)
-existing_tickers = set(temp_library.keys())
-existing_isins = {meta.get("isin") for meta in temp_library.values() if meta.get("isin")}
-
-for ticker, info in ETF_UNIVERSE.items():
-    if ticker in existing_tickers:
-        continue
-    isin = info.get("isin")
-    if isin and isin in existing_isins:
-        continue
-    category = info.get("category", "Unknown")
-    region = infer_region(category)
-    theme = infer_theme(category)
-    risk_type = "HighVol" if any(x in category.lower() for x in ["leveraged", "high vol", "volatile"]) else \
-                "Defensive" if any(x in category.lower() for x in ["defensive", "low carbon", "esg", "sri"]) else \
-                "Standard"
-    enveloppe = "PEA" if "pea" in info.get("name", "").lower() else "AV"
-    temp_library[ticker] = {
-        "nom": info["name"],
-        "name": info["name"],
-        "yf": ticker,
-        "yf_fallbacks": [],
-        "category": category,
-        "theme": theme,
-        "region": region,
-        "risk_type": risk_type,
-        "enveloppe": enveloppe,
-        "initial_target": 0.0,
-        "isin": isin
-    }
-
-ETF_LIBRARY = normalize_etf_library(temp_library)
-
-# ---- Variables globales ----
-WORLD_TICKERS = ["WMMS.DE", "MWRD.PA", "IWDA.AS", "EUNL.DE", "DCAM.PA"]
 GOLD_TICKERS_FALLBACK = []
+WORLD_TICKERS = ["WMMS.DE", "WMMS.XETRA", "MWRD.PA", "IWDA.AS", "EUNL.DE", "DCAM.PA"]
 PROXIES_KR = ["005930.KS", "000660.KS"]
 PROXIES_CHIP = ["TSM", "NVDA", "AMD", "INTC"]
 MACRO_TICKERS = {"NQ=F": "Nasdaq 100", "ES=F": "S&P 500", "^TNX": "US 10Y (%)", "EURUSD=X": "EUR/USD", "BZ=F": "Brent ($)", "GC=F": "Or ($)", "DX-Y.NYB": "Dollar Index", "MCHI": "iShares MSCI China"}
@@ -486,9 +179,10 @@ _DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local.db")
 _PORTFOLIO_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "portfolio_positions.json")
 _TRANSACTIONS_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transactions.json")
 
-# -----------------------------------------------------------------------------
-# MODULE 3 : DATA MANAGER (avec fallback)
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# MODULE 3 : DATA MANAGER (avec fallbacks)
+# ─────────────────────────────────────────────────────────────────────────────
+
 requests_cache.install_cache('yfinance_cache', expire_after=86400)
 
 def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -545,7 +239,7 @@ def _collect_all_yf_tickers() -> List[str]:
     tickers.extend(REGIME_TICKERS)
     tickers.extend(PROXIES_KR)
     tickers.extend(PROXIES_CHIP)
-    tickers.extend(["NVDA", "AAPL", "GOOGL", "GOOG", "MSFT", "AMZN"])
+    tickers.extend(WORLD_STOCKS_TICKERS)  # <-- AJOUT pour éviter les N/A
     for tlist in SENTINELLES.values():
         tickers.extend(tlist)
     return list(dict.fromkeys(tickers))
@@ -589,22 +283,6 @@ def _cached_historical_data() -> Dict[str, pd.DataFrame]:
             pass
     return result
 
-def get_working_ticker(meta: Dict) -> Optional[str]:
-    candidates = []
-    if meta.get("yf"):
-        candidates.append(meta["yf"])
-    for fb in meta.get("yf_fallbacks", []):
-        if fb not in candidates:
-            candidates.append(fb)
-    for ticker in candidates:
-        try:
-            data = yf.download(ticker, period="5d", progress=False, auto_adjust=True)
-            if data is not None and not data.empty and "Close" in data.columns:
-                return ticker
-        except Exception:
-            continue
-    return None
-
 class DataManager:
     def __init__(self):
         self.live = _cached_live_prices()
@@ -639,24 +317,14 @@ class DataManager:
     def sma(self, series: pd.Series, n: int) -> Optional[float]:
         s = series.dropna()
         return float(s.rolling(n).mean().iloc[-1]) if len(s) >= n else None
-
     def rsi(self, series: pd.Series, period: int = 14) -> Optional[float]:
         return ta.momentum.RSIIndicator(series, window=period).rsi().iloc[-1] if len(series) > period else None
-
     def adx(self, df: pd.DataFrame, period: int = 14) -> Optional[float]:
         return None
-
     def analyze_ticker(self, ticker: str) -> Optional[Dict]:
         lp = self.live.get(ticker, {})
         prix = lp.get("prix")
         df = self.data.get(ticker, pd.DataFrame())
-        if df.empty or "Close" not in df.columns:
-            meta = {"yf": ticker, "yf_fallbacks": []}
-            working = get_working_ticker(meta)
-            if working:
-                df = self.data.get(working, pd.DataFrame())
-                lp = self.live.get(working, {})
-                prix = lp.get("prix")
         if df.empty or "Close" not in df.columns:
             return {"ticker": ticker, "prix": prix, "sma20": None, "sma50": None, "sma200": None, "rsi": None, "adx": None, "ath30": None} if prix else None
         close = df["Close"].dropna()
@@ -664,13 +332,13 @@ class DataManager:
         return {"ticker": ticker, "prix": prix_live, "sma20": self.sma(close, 20), "sma50": self.sma(close, 50),
                 "sma200": self.sma(close, 200), "rsi": self.rsi(close), "adx": None,
                 "ath30": float(close.rolling(30, min_periods=1).max().iloc[-1])}
-
     def relative_strength_slope(self, ticker: str, days: int = 14) -> Optional[float]:
         return None
 
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # MODULE 4 : ANALYTICS ENGINE
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+
 class AnalyticsEngine:
     WINDOW_1M = 21
     WINDOW_3M = 63
@@ -894,9 +562,10 @@ class AnalyticsEngine:
         }
         return metrics
 
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # MODULE 5 : SIGNAL ENGINE
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+
 class SignalEngine:
     def __init__(self, dm: DataManager, analytics: AnalyticsEngine):
         self.dm = dm
@@ -954,9 +623,10 @@ class SignalEngine:
                     break
         return opportunities
 
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # MODULE 6 : PERSISTENCE MANAGER
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+
 _CSV_COLS = ["date", "capital_cloture", "valeur_titres",
              "perf_jour", "perf_cumul", "regime", "score_regime",
              "poids_sat"]
@@ -1114,36 +784,31 @@ class PersistenceManager:
     def warning_msg(self) -> str:
         return self._github_warning
 
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # MODULE 7 : PORTFOLIO CONFIG MANAGER & TRANSACTION ENGINE
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+
 class PortfolioConfigManager:
     def __init__(self, file_path: str = _PORTFOLIO_JSON):
         self.file_path = file_path
 
     def load_positions(self) -> List[Dict]:
-        # Positions par défaut (garanties)
-        default_positions = [
-            {"ticker": "WMMS.DE", "parts": 461.9561, "prm": 13.582, "account": "AV"},
-            {"ticker": "DCAM.PA", "parts": 508.0000, "prm": 4.983, "account": "PEA"},
-            {"ticker": "MWRD.PA", "parts": 16.6229, "prm": 149.718, "account": "AV"},
-            {"ticker": "KRW.PA", "parts": 14.8501, "prm": 142.370, "account": "AV"},
-            {"ticker": "CHIP.PA", "parts": 21.4922, "prm": 99.159, "account": "AV"},
-        ]
         try:
             if os.path.exists(self.file_path) and os.stat(self.file_path).st_size > 0:
                 with open(self.file_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, list) and data:
-                    # Fusion : on ajoute les positions manquantes (par ticker)
-                    existing_tickers = {pos["ticker"] for pos in data}
-                    for default_pos in default_positions:
-                        if default_pos["ticker"] not in existing_tickers:
-                            data.append(default_pos)
                     return data
         except Exception:
             pass
-        return default_positions
+        # Positions mises à jour au 8 septembre 2026
+        return [
+            {"ticker": "WMMS.XETRA", "parts": 461.9561, "prm": 13.582, "account": "AV"},
+            {"ticker": "DCAM.PA",    "parts": 508.0000, "prm": 4.983, "account": "PEA"},
+            {"ticker": "MWRD.PA",    "parts": 16.6229, "prm": 149.718, "account": "AV"},
+            {"ticker": "KRW.PA",     "parts": 14.8501, "prm": 142.370, "account": "AV"},
+            {"ticker": "CHIP.PA",    "parts": 21.4922, "prm": 99.159, "account": "AV"},
+        ]
 
     def save_positions(self, positions: List[Dict]) -> bool:
         try:
@@ -1212,9 +877,10 @@ class TransactionEngine:
             })
         return result
 
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # MODULE 8 : MARKET REGIME ENGINE
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+
 _REGIME_LABELS = [
     (4, 5, "Euphorie", "regime-euphorie", "#A855F7"),
     (2, 3, "Expansion", "regime-expansion", "#22C55E"),
@@ -1334,9 +1000,10 @@ class MarketRegimeEngine:
             detail.append({"name": "Liquidité (DXY)", "bull": None, "val": "N/A"})
         return detail
 
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # MODULE 9 : QUANT RISK ENGINE
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+
 class QuantRiskEngine:
     def __init__(self, dm: DataManager):
         self.dm = dm
@@ -1480,9 +1147,10 @@ class QuantRiskEngine:
         cov = df_all.cov().values * 252
         return float(np.sqrt(w @ cov @ w))
 
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # MODULE 10 : PORTFOLIO ENGINE
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+
 def enrich_positions(raw_positions: List[Dict]) -> List[Dict]:
     result = []
     for pos in raw_positions:
@@ -1508,6 +1176,7 @@ class PortfolioEngine:
         self.qre = qre
 
     def compute_adjusted_benchmark(self) -> float:
+        # Utiliser la valeur forcée au lieu du calcul
         return _FORCED_WORLD_PERF
 
     def compute_portfolio(self, positions_conf: List[Dict], capital_reel: float, ajustement_pat: float, bonus_fortuneo: float) -> Dict:
@@ -1811,13 +1480,19 @@ class PortfolioEngine:
                 return 0.07, True
             return weighted_cagr, any_fallback
 
-# -----------------------------------------------------------------------------
-# MODULE 11 : QUANT ALERT ENGINE
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# MODULE 11 : QUANT ALERT ENGINE (version corrigée avec probabilités renforcées)
+# ─────────────────────────────────────────────────────────────────────────────
+
 class QuantAlertEngine:
+    """
+    Moteur d'alertes quantitatives pour anticiper les baisses avant 16h30.
+    Utilise des indicateurs techniques, des probabilités J+1/J+2/J+3,
+    l'espérance de gain (EV) avec coûts de 10 bps, et des paliers d'exposition.
+    """
     def __init__(self, dm: DataManager):
         self.dm = dm
-        self.COST_BPS = 0.0010
+        self.COST_BPS = 0.0010  # 10 bps = 0.10%
         self.EXPOSURE_PALIERS = [0.0, 0.25, 0.50, 0.75, 1.0]
 
     def _compute_indicators(self, ticker: str) -> Dict:
@@ -1861,26 +1536,28 @@ class QuantAlertEngine:
         vol_ratio = indicators.get("vol_ratio", 1.0)
         vix_ratio = indicators.get("vix_ratio", 1.0)
 
+        # PONDÉRATIONS AUGMENTÉES pour rendre les signaux plus réactifs
         score = 0.0
         if rsi > 70:
-            score += (rsi - 70) / 30 * 0.6
+            score += (rsi - 70) / 30 * 0.6       # au lieu de 0.3
         elif rsi < 30:
-            score += (30 - rsi) / 30 * 0.4
+            score += (30 - rsi) / 30 * 0.4       # au lieu de 0.2
         if macd < 0:
-            score += min(-macd / 5, 0.6)
+            score += min(-macd / 5, 0.6)          # au lieu de 0.3
         if dist20 < -2:
-            score += min(abs(dist20) / 10, 0.5)
+            score += min(abs(dist20) / 10, 0.5)    # au lieu de 0.25
         if dist50 < -3:
-            score += min(abs(dist50) / 15, 0.5)
+            score += min(abs(dist50) / 15, 0.5)    # au lieu de 0.25
         if mom5 < -1:
-            score += min(abs(mom5) / 10, 0.4)
+            score += min(abs(mom5) / 10, 0.4)      # au lieu de 0.2
         if vol_ratio > 1.2:
-            score += min((vol_ratio - 1.2) * 0.4, 0.3)
+            score += min((vol_ratio - 1.2) * 0.4, 0.3)  # au lieu de 0.2
         if vix_ratio > 1.1:
-            score += min((vix_ratio - 1.1) * 0.3, 0.2)
+            score += min((vix_ratio - 1.1) * 0.3, 0.2)  # au lieu de 0.15
 
         factor = 1.0 / horizon
         prob = min(score * factor, 0.65)
+        # Renforcement pour les signaux forts
         if prob > 0.3:
             prob += 0.1
         return max(0.0, min(1.0, prob))
@@ -1896,12 +1573,13 @@ class QuantAlertEngine:
 
         vol = self.dm.analyze_ticker(ticker).get("volatility", 20) if self.dm.analyze_ticker(ticker) else 20
         expected_drop = (abs(indicators.get("dist_sma20", 0)) + 0.5 * abs(indicators.get("dist_sma50", 0))) / 100.0
-        expected_drop = max(0.005, min(0.05, expected_drop))
+        expected_drop = max(0.005, min(0.05, expected_drop))  # au moins 0.5% pour éviter des EV trop faibles
 
         cost = self.COST_BPS
         ev = p1 * expected_drop - (1 - p1) * cost
 
-        ev_thresholds = [0.001, 0.003, 0.006]
+        # Seuils abaissés pour déclencher plus tôt
+        ev_thresholds = [0.001, 0.003, 0.006]   # 0.1%, 0.3%, 0.6%
         sell_pct = 0.0
         if ev > ev_thresholds[0]:
             sell_pct = 0.25
@@ -1911,6 +1589,7 @@ class QuantAlertEngine:
             sell_pct = 0.75
         sell_amount = sell_pct * position_value
 
+        # Filtre de persistance : si J+2 et J+3 ne confirment pas, on réduit la vente
         if p2 < 0.3 * p1 and p3 < 0.2 * p1:
             sell_pct = min(sell_pct, 0.25)
 
@@ -1929,9 +1608,10 @@ class QuantAlertEngine:
             "indicators": indicators
         }
 
-# -----------------------------------------------------------------------------
-# MODULE 12 : PEDAGOGIC ENGINE
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# MODULE 12 : PEDAGOGIC ENGINE (version corrigée pour le leadership)
+# ─────────────────────────────────────────────────────────────────────────────
+
 class PedagogicEngine:
     def translate_volatility(self, vol: Optional[float], asset_name: str) -> Dict:
         if vol is None:
@@ -2009,14 +1689,22 @@ class PedagogicEngine:
                 "level": info["level"], "explain": info["explain"], "action": info["action"], "conseil": info["conseil"]}
 
     def get_weekly_performances(self, dm: DataManager, ticker_key: str, n_weeks: int = 5) -> Tuple[List[str], List[float], List[float]]:
+        """
+        Récupère les performances hebdomadaires d'un ETF par rapport au World.
+        ticker_key est la clé de la bibliothèque (ex: "WMMS.XETRA").
+        On essaie tous les tickers (yf et fallbacks) jusqu'à trouver des données.
+        """
+        # Résolution du ticker yfinance
         meta = ETF_LIBRARY.get(ticker_key, {})
         possible_tickers = [meta.get("yf")] + meta.get("yf_fallbacks", [])
-        possible_tickers = [t for t in possible_tickers if t]
+        possible_tickers = [t for t in possible_tickers if t]  # enlever None
         sat_df = None
+        used_ticker = None
         for t in possible_tickers:
             df = dm.data.get(t)
             if df is not None and not df.empty and "Close" in df.columns:
                 sat_df = df
+                used_ticker = t
                 break
         if sat_df is None:
             return [], [], []
@@ -2106,9 +1794,10 @@ class PedagogicEngine:
             return {"emoji": "🔴", "level": "red", "message": "Décrochage fort des leaders.",
                     "detail": f"{', '.join([a['Sentinelle'] for a in alerts])} sous SMA20.", "action": "Réduction conseillée."}
 
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # MODULE 13 : STRATEGIC ENGINE
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+
 class StrategicEngine:
     def __init__(self, dm: DataManager, mre: MarketRegimeEngine, qre: QuantRiskEngine):
         self.dm = dm; self.mre = mre; self.qre = qre
@@ -2167,9 +1856,10 @@ class StrategicEngine:
             verdict, verdict_cls = "🔴 Conditions défavorables --- Réduction recommandée", "verdict-red"
         return {"total": total, "details": details, "verdict": verdict, "verdict_cls": verdict_cls}
 
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # MODULE 14 : FISCAL
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+
 def net_apres_impots(enveloppe: str, montant: float, val_poche: float, gain_poche: float) -> Tuple[float, str]:
     if montant <= 0:
         return 0.0, ""
@@ -2191,9 +1881,10 @@ def net_apres_impots(enveloppe: str, montant: float, val_poche: float, gain_poch
         return montant - ps - ir, ""
     return montant, ""
 
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # MODULE 15 : VISUALISATIONS
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+
 _PLOTLY_BASE = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#CBD5E1", family="DM Sans"))
 
 def plot_equity_curve(history: pd.DataFrame) -> Optional[go.Figure]:
@@ -2257,7 +1948,7 @@ def plot_weekly_leadership(labels: List[str], sat_perfs: List[float], world_perf
 
 def plot_correlation_heatmap(corr_df: pd.DataFrame) -> go.Figure:
     short = {
-        "WMMS.DE": "WMMS", "MWRD.PA": "World", "DCAM.PA": "W-PEA",
+        "WMMS.XETRA": "WMMS", "WMMS.DE": "WMMS", "MWRD.PA": "World", "DCAM.PA": "W-PEA",
         "KRW.PA": "Korea", "CHIP.PA": "CHIP", "LYXTNOW.PA": "InfoTech", "IJPE.PA": "JapSC",
         "CV9.PA": "EuVal", "LYXFINW.PA": "Fin"
     }
@@ -2282,7 +1973,7 @@ def plot_risk_contribution(rc: Dict) -> Optional[go.Figure]:
     if not rc:
         return None
     short = {
-        "WMMS.DE": "WMMS", "MWRD.PA": "World", "DCAM.PA": "W-PEA",
+        "WMMS.XETRA": "WMMS", "WMMS.DE": "WMMS", "MWRD.PA": "World", "DCAM.PA": "W-PEA",
         "KRW.PA": "Korea", "CHIP.PA": "CHIP"
     }
     names = [short.get(tk, tk) for tk in rc]
@@ -2398,9 +2089,10 @@ def plot_relative_perf(dm: DataManager, ticker: str, nom: str) -> Optional[go.Fi
     )
     return fig
 
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # MODULE 16 : STREAMLIT UI
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+
 class StreamlitUI:
     def __init__(self, dm: DataManager, pm: PersistenceManager,
                  mre: MarketRegimeEngine, qre: QuantRiskEngine,
@@ -2426,7 +2118,7 @@ class StreamlitUI:
         return "+" if v >= 0 else ""
 
     def render_sidebar(self) -> Tuple[bool, List[Dict], float, float, float]:
-        st.sidebar.markdown("## ⚙ Paramètres v6.5")
+        st.sidebar.markdown("## ⚙ Paramètres v6.3")
         mode_direct = st.sidebar.toggle("🔌 Mode Direct (Vue Brute)", value=False)
         st.sidebar.markdown("---")
         cap = st.sidebar.number_input("Capital investi (€)", value=st.session_state["cfg_capital_reel"], step=100.0, format="%.2f", key="input_capital_reel")
@@ -2531,7 +2223,7 @@ class StreamlitUI:
         st.markdown('<div style="display:flex;align-items:baseline;gap:1rem;margin-bottom:.2rem;">'
                     '<span style="font-family:Space Mono;font-size:1.6rem;font-weight:700;color:#D4AF37;">◈</span>'
                     '<span style="font-size:1.5rem;font-weight:700;color:#E2E8F0;">COCKPIT DÉCISIONNEL</span>'
-                    '<span style="font-family:Space Mono;font-size:.9rem;color:#6B7585;">v6.5 · ALERTE QUANT</span></div>', unsafe_allow_html=True)
+                    '<span style="font-family:Space Mono;font-size:.9rem;color:#6B7585;">v6.3 · ALERTE QUANT</span></div>', unsafe_allow_html=True)
         c1, c2 = st.columns([3, 1])
         with c1:
             st.caption(f"Prix live · {now.strftime('%d/%m/%Y %H:%M:%S')} (Paris) · Cache 30s/90s")
@@ -2721,7 +2413,7 @@ class StreamlitUI:
         if mwr_adj is not None:
             gap = bench.get("gap", 0.0) or 0.0
             gc = "#22C55E" if gap >= 0 else "#FF3131"
-            st.markdown(f'<div class="pedagogy-box"><div class="pedagogy-title">🆕 v6.5 --- Benchmark MWR Cash-Flow Adjusted</div>'
+            st.markdown(f'<div class="pedagogy-box"><div class="pedagogy-title">🆕 v6.3 --- Benchmark MWR Cash-Flow Adjusted</div>'
                         f'Le "Gap vs World" est calculé en simulant l\'achat de MWRD.PA aux mêmes dates et montants que vos flux réels. '
                         f'<b>World MWR = {s(mwr_adj)}{mwr_adj:.2f}%</b> · '
                         f'<b style="color:{gc};">Votre Alpha = {s(gap)}{gap:.2f}%</b></div>', unsafe_allow_html=True)
@@ -2775,11 +2467,16 @@ class StreamlitUI:
             st.markdown('</div>', unsafe_allow_html=True)
 
     def render_leadership_comparison(self, nom: str, ticker_key: str, color_sat: str = "#D4AF37"):
+        """
+        Affiche le graphique de leadership hebdomadaire pour un ETF donné.
+        ticker_key est la clé de la bibliothèque (ex: "WMMS.XETRA").
+        """
         st.markdown(f"### 📊 {nom} vs MSCI World --- Leadership hebdomadaire")
         with st.container():
             st.markdown('<div class="leadership-header"><div style="font-size:.8rem;color:#6B7585;">POURQUOI CE GRAPHIQUE EST IMPORTANT</div>'
                         '<div style="color:#E2E8F0;line-height:1.6;">Ce graphique compare chaque semaine la performance de votre ETF vs le MSCI World. '
                         '<b>Si l\'ETF fait régulièrement moins bien que le World</b>, il perd sa raison d\'être.</div></div>', unsafe_allow_html=True)
+        # Utilisation de la méthode corrigée de PedagogicEngine
         labels, sat_perfs, world_perfs = self.pde.get_weekly_performances(self.dm, ticker_key)
         if labels and sat_perfs and world_perfs:
             col_chart, col_verdict = st.columns([2, 1])
@@ -2819,7 +2516,7 @@ class StreamlitUI:
                 ticker = pos["ticker"]
                 name = pos["nom"]
                 color_map = {
-                    "WMMS.DE": "#D4AF37",
+                    "WMMS.XETRA": "#D4AF37",
                     "DCAM.PA": "#007BFF",
                     "MWRD.PA": "#3B82F6",
                     "KRW.PA": "#F97316",
@@ -2890,7 +2587,7 @@ class StreamlitUI:
                         flags = [tk for tk, v in rc.items() if v["flag"]]
                         if flags:
                             short = {
-                                "WMMS.DE": "WMMS", "MWRD.PA": "World",
+                                "WMMS.XETRA": "WMMS", "WMMS.DE": "WMMS", "MWRD.PA": "World",
                                 "DCAM.PA": "W-PEA", "KRW.PA": "Korea", "CHIP.PA": "CHIP"
                             }
                             f_names = ", ".join([short.get(f, f) for f in flags])
@@ -2898,6 +2595,7 @@ class StreamlitUI:
 
     def render_satellite_card_pedagogic(self, nom: str, ticker_key: str, unified: Dict, target_weight: Dict,
                                         regime: Dict, sent_rows: List[Dict], sector: str, gap_vs_world: Optional[float] = None):
+        """Affiche une carte pédagogique pour un ETF satellite, avec option d'écart vs World."""
         color_map = {"korea": "#F97316", "chip": "#A855F7", "value": "#D4AF37"}
         color = color_map.get(sector, "#D4AF37")
         strat_full = self.se.compute(ticker_key, unified, regime)
@@ -2928,6 +2626,7 @@ class StreamlitUI:
         st.markdown('</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="{strat_full["verdict_cls"]} verdict-card">{strat_full["verdict"]}'
                     f'<div style="font-size:.82rem;margin-top:.4rem;">💡 {simple_score["action"]}</div></div>', unsafe_allow_html=True)
+        # Appel de la méthode corrigée avec la clé de bibliothèque
         self.render_leadership_comparison(nom, ticker_key, color)
         sent_verdict = self.pde.translate_sentinelles(sent_rows, sector)
         lv_color = {"green": "#22C55E", "orange": "#F97316", "red": "#FF3131"}.get(sent_verdict["level"], "#6B7585")
@@ -3065,7 +2764,7 @@ class StreamlitUI:
                    "BZ=F": ".2f", "GC=F": ".2f", "DX-Y.NYB": ".2f", "MCHI": ".2f"}
             SFX = {"^TNX": "%", "BZ=F": "$", "GC=F": "$"}
             st.markdown("#### 📡 Signaux ETF (Prix > SMA200)")
-            for etf_name, etf_ticker in [("WMMS", "WMMS.DE"), ("MWRD World", "MWRD.PA"),
+            for etf_name, etf_ticker in [("WMMS", "WMMS.XETRA"), ("MWRD World", "MWRD.PA"),
                                          ("DCAM PEA", "DCAM.PA"), ("Korea", "KRW.PA"), ("CHIP", "CHIP.PA")]:
                 info = self.dm.analyze_ticker(etf_ticker)
                 if info and info["prix"] and info["sma200"]:
@@ -3153,16 +2852,21 @@ class StreamlitUI:
         st.markdown("## 📈 Cockpit Décisionnel Long Terme — Analyse de tous les ETF disponibles")
         st.caption("Résumé des métriques clés pour l'ensemble des ETF de la bibliothèque (même ceux non détenus).")
 
+        # On récupère tous les tickers de la bibliothèque
         all_tickers = list(ETF_LIBRARY.keys())
         etf_metrics = {}
         for ticker in all_tickers:
+            # On résout le ticker Yahoo pour les données
             meta = ETF_LIBRARY.get(ticker, {})
             yf_ticker = meta.get("yf", ticker)
+            # On utilise les données déjà chargées
             if yf_ticker in self.dm.data:
                 etf_metrics[ticker] = analytics_engine.compute_all_metrics(yf_ticker)
             else:
+                # Fallback sur le ticker lui-même si non trouvé
                 etf_metrics[ticker] = analytics_engine.compute_all_metrics(ticker)
 
+        # Fonction pour calculer le gap vs World sur 3 semaines (on utilise le ticker yf)
         def relative_perf_3w(ticker):
             meta = ETF_LIBRARY.get(ticker, {})
             yf_tk = meta.get("yf", ticker)
@@ -3186,6 +2890,7 @@ class StreamlitUI:
             world_ret = (world_close.iloc[-1] / world_close.iloc[-period-1] - 1) * 100 if len(world_close) >= period+1 else 0
             return asset_ret - world_ret
 
+        # Construire le tableau pour tous les ETFs
         data = []
         for ticker in all_tickers:
             meta = ETF_LIBRARY.get(ticker, {})
@@ -3384,29 +3089,32 @@ class StreamlitUI:
         with st.spinner("Calcul des scores en cours... (peut prendre quelques secondes)"):
             scores = []
             for ticker, meta in ETF_LIBRARY.items():
+                # Résoudre le ticker Yahoo réel pour le signal
                 yf_ticker = meta.get("yf", ticker)
-                # On tente le score même si les données sont manquantes
+                if yf_ticker not in self.dm.data:
+                    continue
                 res = self.signal.compute_score(yf_ticker)
-                # Si aucune donnée, res = {"score": 0, "metrics": {}}
-                # On ajoute quand même l'entrée
+                if res["score"] == 0 and not res["metrics"]:
+                    continue
                 scores.append({
                     "Ticker": ticker,
                     "Nom": meta.get("nom", ""),
                     "Catégorie": meta.get("category", ""),
                     "Thème": meta.get("theme", ""),
                     "Score": res["score"],
-                    "Momentum 6M": f"{res['metrics'].get('mom_6m', 0):.1f}%" if res['metrics'] else "N/A",
-                    "Force Relative": f"{res['metrics'].get('rel_strength', 0):.1f}%" if res['metrics'] else "N/A",
-                    "Volatilité": f"{res['metrics'].get('volatility', 0):.1f}%" if res['metrics'] else "N/A",
-                    "Sharpe": f"{res['metrics'].get('sharpe', 0):.2f}" if res['metrics'] else "N/A",
-                    "Drawdown": f"{res['metrics'].get('max_drawdown_1y', 0):.1f}%" if res['metrics'] else "N/A",
-                    "Corr 1M": f"{res['metrics'].get('corr_1m', 0):.2f}" if res['metrics'] and res['metrics'].get('corr_1m') is not None else "N/A",
-                    "Corr 3M": f"{res['metrics'].get('corr_3m', 0):.2f}" if res['metrics'] and res['metrics'].get('corr_3m') is not None else "N/A",
-                    "Corr 6M": f"{res['metrics'].get('corr_6m', 0):.2f}" if res['metrics'] and res['metrics'].get('corr_6m') is not None else "N/A",
-                    "Corr 1Y": f"{res['metrics'].get('corr_1y', 0):.2f}" if res['metrics'] and res['metrics'].get('corr_1y') is not None else "N/A",
+                    "Momentum 6M": f"{res['metrics'].get('mom_6m', 0):.1f}%",
+                    "Force Relative": f"{res['metrics'].get('rel_strength', 0):.1f}%",
+                    "Volatilité": f"{res['metrics'].get('volatility', 0):.1f}%",
+                    "Sharpe": f"{res['metrics'].get('sharpe', 0):.2f}",
+                    "Drawdown": f"{res['metrics'].get('max_drawdown_1y', 0):.1f}%",
+                    "Corr 1M": f"{res['metrics'].get('corr_1m', 0):.2f}" if res['metrics'].get('corr_1m') is not None else "N/A",
+                    "Corr 3M": f"{res['metrics'].get('corr_3m', 0):.2f}" if res['metrics'].get('corr_3m') is not None else "N/A",
+                    "Corr 6M": f"{res['metrics'].get('corr_6m', 0):.2f}" if res['metrics'].get('corr_6m') is not None else "N/A",
+                    "Corr 1Y": f"{res['metrics'].get('corr_1y', 0):.2f}" if res['metrics'].get('corr_1y') is not None else "N/A",
                 })
             df_scores = pd.DataFrame(scores).sort_values("Score", ascending=False)
 
+        # Gestion du cas vide ou trop petit
         if df_scores.empty:
             st.warning("Aucun ETF n'a pu être analysé (données manquantes). Vérifiez votre connexion ou les tickers.")
             return
@@ -3438,7 +3146,7 @@ class StreamlitUI:
             if not meta:
                 continue
             cat = meta.get("category", "Satellite")
-            if pos["nom"] == "Amundi MSCI World IMI Value Advanced":
+            if pos["nom"] == "Amundi MSCI World IMI Value Screened":
                 base_target = 0.37
             elif pos["nom"] == "MSCI World PEA":
                 base_target = 0.183
@@ -3485,7 +3193,7 @@ class StreamlitUI:
             s = self._sign
             mode_txt = "🔌 MODE DIRECT" if mode_direct else "Ajust. patrimonial actif"
             persist = "GitHub Gist + SQLite" if self.pm.status == "github" else "SQLite local"
-            st.caption(f"◈ Cockpit v6.5 · Alerte Quant · {mode_txt} · "
+            st.caption(f"◈ Cockpit v6.3 · Alerte Quant · {mode_txt} · "
                        f"Régime : {regime_label} · Capital {capital:,.2f}€ · Persistance : {persist} · {live_ok}/{live_total} prix live · "
                        f"Benchmark : MWR Cash-Flow Adjusted · Outil personnel --- Ne constitue pas un conseil en investissement")
         with col_f2:
@@ -3493,9 +3201,11 @@ class StreamlitUI:
                 st.cache_data.clear()
                 st.rerun()
 
-# -----------------------------------------------------------------------------
+
+# ─────────────────────────────────────────────────────────────────────────────
 # MODULE 17 : MAIN
-# -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+
 def _load_config() -> Dict:
     defaults = {"capital_reel": _DEFAULT_CAPITAL_REEL, "ajustement_pat": _DEFAULT_AJUSTEMENT_PAT,
                 "bonus_fortuneo": _DEFAULT_BONUS_FORTUNEO}
@@ -3563,12 +3273,22 @@ def main():
         bench = pe.compute_benchmark(positions_conf, ptf["perf_tot_pct"])
         regime = mre.get_full_regime()
 
-        wmms_price = dm.live.get("WMMS.DE", {}).get("prix")
+        # --- CORRECTIF v6.3 : calcul de wmms_gap via dm.live avec fallback ---
+        wmms_price = None
+        # Essayer WMMS.DE d'abord
+        live_wmms = dm.live.get("WMMS.DE", {})
+        if live_wmms.get("prix"):
+            wmms_price = live_wmms["prix"]
+        else:
+            live_wmms = dm.live.get("WMMS.XETRA", {})
+            if live_wmms.get("prix"):
+                wmms_price = live_wmms["prix"]
         mwrd_price = dm.live.get("MWRD.PA", {}).get("prix")
         wmms_gap = None
         if wmms_price and mwrd_price:
             wmms_gap = ((wmms_price / mwrd_price) - 1) * 100
 
+        # Récupération des analyses ETF (pour les satellites, etc.)
         etf_analyses = {}
         for pos in positions_conf:
             ticker = pos.get("ticker")
@@ -3616,9 +3336,10 @@ def main():
         ui.render_risk_dashboard(ptf)
         st.markdown("## 🧠 Analyse des ETF Satellites")
 
-        wmms_pos = next((p for p in positions_conf if p.get("ticker") == "WMMS.DE"), None)
+        # 1. World Value (WMMS)
+        wmms_pos = next((p for p in positions_conf if p.get("ticker") == "WMMS.XETRA"), None)
         if wmms_pos:
-            ticker = "WMMS.DE"
+            ticker = "WMMS.XETRA"
             wmms_unified = unified_scores.get(ticker, {})
             wmms_target = target_weights.get(ticker, {})
             wmms_info = etf_analyses.get(ticker)
@@ -3626,15 +3347,16 @@ def main():
                 border = "#22C55E" if (wmms_info.get("sma20") and wmms_info.get("prix") and wmms_info["prix"] > wmms_info["sma20"]) else "#D4AF37"
                 gap_display = f"{wmms_gap:+.2f}%" if wmms_gap is not None else "N/A"
                 st.markdown(f'<div class="card" style="border-left:4px solid {border};margin-bottom:.5rem;">'
-                            f'<b>📈 Amundi MSCI World IMI Value Advanced (WMMS) - Écart vs World : {gap_display}</b></div>', unsafe_allow_html=True)
+                            f'<b>📈 Amundi MSCI World IMI Value Screened (WMMS) - Écart vs World : {gap_display}</b></div>', unsafe_allow_html=True)
                 with st.container():
-                    st.markdown("### 📈 Amundi MSCI World IMI Value Advanced (WMMS)")
-                    ui.render_satellite_card_pedagogic("WMMS Value", "WMMS.DE", wmms_unified, wmms_target, regime, sent_rows, "value", gap_vs_world=wmms_gap)
+                    st.markdown("### 📈 Amundi MSCI World IMI Value Screened (WMMS)")
+                    ui.render_satellite_card_pedagogic("WMMS Value", "WMMS.XETRA", wmms_unified, wmms_target, regime, sent_rows, "value", gap_vs_world=wmms_gap)
             else:
                 st.markdown('<div class="card card-orange"><div class="kpi-label">WMMS Value</div>'
                             '<div class="small">Données indisponibles pour cet ETF pour le moment (vérifiez le ticker Yahoo Finance WMMS.DE).</div></div>', unsafe_allow_html=True)
         st.markdown("<br>", unsafe_allow_html=True)
 
+        # 2. Korea
         krw_pos = next((p for p in positions_conf if p.get("ticker") == "KRW.PA"), None)
         if krw_pos:
             ticker = "KRW.PA"
@@ -3650,6 +3372,7 @@ def main():
                     ui.render_satellite_card_pedagogic("MSCI Korea", "KRW.PA", krw_unified, krw_target, regime, sent_rows, "korea")
         st.markdown("<br>", unsafe_allow_html=True)
 
+        # 3. Semiconductors
         chip_pos = next((p for p in positions_conf if p.get("ticker") == "CHIP.PA"), None)
         if chip_pos:
             ticker = "CHIP.PA"
