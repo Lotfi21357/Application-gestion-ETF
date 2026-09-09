@@ -1179,25 +1179,34 @@ class PersistenceManager:
             pass
 
     def save_snapshot(self, capital_cloture: float, valeur_titres: float,
-                      perf_jour: float, perf_cumul: float, regime: str,
-                      score_regime: int, poids_sat: float) -> bool:
-        today = datetime.now(ZoneInfo("Europe/Paris")).strftime("%Y-%m-%d")
-        try:
-            self._conn.execute("""
-            INSERT OR REPLACE INTO snapshots
-            (date,capital_cloture,valeur_titres,perf_jour,perf_cumul,
-             regime,score_regime,poids_sat)
-            VALUES (?,?,?,?,?,?,?,?)
-            """, (today, round(capital_cloture, 2), round(valeur_titres, 2),
-                  round(perf_jour, 4), round(perf_cumul, 4), regime,
-                  score_regime, round(poids_sat, 4)))
-            self._conn.commit()
-            self._history_cache = None
-            if self._github_ok:
+                  perf_jour: float, perf_cumul: float, regime: str,
+                  score_regime: int, poids_sat: float) -> bool:
+    today = datetime.now(ZoneInfo("Europe/Paris")).strftime("%Y-%m-%d")
+    try:
+        self._conn.execute("""
+        INSERT OR REPLACE INTO snapshots
+        (date,capital_cloture,valeur_titres,perf_jour,perf_cumul,
+         regime,score_regime,poids_sat)
+        VALUES (?,?,?,?,?,?,?,?)
+        """, (today, round(capital_cloture, 2), round(valeur_titres, 2),
+              round(perf_jour, 4), round(perf_cumul, 4), regime,
+              score_regime, round(poids_sat, 4)))
+        self._conn.commit()
+        self._history_cache = None
+
+        # Tentative de push GitHub, mais on ne bloque pas en cas d'échec
+        if self._github_ok:
+            try:
                 self._push_to_github(self.load_history())
-            return True
-        except Exception:
-            return False
+            except Exception as e:
+                # Avertissement dans la console (ou on pourrait le remonter)
+                print(f"⚠️ Échec de la synchronisation GitHub : {e}")
+                # Mais on ne fait pas échouer la sauvegarde locale
+        return True
+    except Exception as e:
+        # Affiche l'erreur dans l'interface Streamlit (utile pour le débogage)
+        st.error(f"Erreur lors de l'enregistrement : {e}")
+        return False
 
     def load_history(self) -> pd.DataFrame:
         if self._history_cache is not None:
