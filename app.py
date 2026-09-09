@@ -2399,6 +2399,30 @@ class StrategicEngine:
             verdict, verdict_cls = "🔴 Conditions défavorables --- Réduction recommandée", "verdict-red"
         return {"total": total, "details": details, "verdict": verdict, "verdict_cls": verdict_cls}
 
+# -----------------------------------------------------------------------------
+# MODULE 14 : FISCAL
+# -----------------------------------------------------------------------------
+def net_apres_impots(enveloppe: str, montant: float, val_poche: float, gain_poche: float) -> Tuple[float, str]:
+    if montant <= 0:
+        return 0.0, ""
+    if montant > val_poche:
+        return 0.0, "⚠ Montant supérieur à la valeur de la poche"
+    ratio_gain = gain_poche / val_poche if val_poche else 0
+    gain_retrait = montant * ratio_gain
+    now_tz = datetime.now(ZoneInfo("Europe/Paris"))
+    if enveloppe == "PEA":
+        limite = datetime(2031, 4, 1, tzinfo=ZoneInfo("Europe/Paris"))
+        if now_tz < limite:
+            return 0.0, "⚠ Retrait PEA impossible avant le 01/04/2031 (fermeture enveloppe)"
+        return montant - 0.172 * gain_retrait, ""
+    if enveloppe == "AV":
+        if now_tz < datetime(2033, 9, 17, tzinfo=ZoneInfo("Europe/Paris")):
+            return montant - 0.30 * gain_retrait, ""
+        ps = 0.172 * gain_retrait
+        ir = 0.128 * max(0, gain_retrait - 9200)
+        return montant - ps - ir, ""
+    return montant, ""
+
 # =============================================================================
 # MODULE 18 : INDICATOR ENGINE (indicateurs complets pour Decision Engine)
 # =============================================================================
