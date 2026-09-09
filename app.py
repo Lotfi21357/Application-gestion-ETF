@@ -2338,6 +2338,67 @@ class PedagogicEngine:
             return {"emoji": "🔴", "level": "red", "message": "Décrochage fort des leaders.",
                     "detail": f"{', '.join([a['Sentinelle'] for a in alerts])} sous SMA20.", "action": "Réduction conseillée."}
 
+# -----------------------------------------------------------------------------
+# MODULE 13 : STRATEGIC ENGINE (inchangé)
+# -----------------------------------------------------------------------------
+class StrategicEngine:
+    def __init__(self, dm: DataManager, mre: MarketRegimeEngine, qre: QuantRiskEngine):
+        self.dm = dm; self.mre = mre; self.qre = qre
+
+    def compute(self, ticker: str, unified_score: Dict, regime: Dict) -> Dict:
+        details = []
+        rsi = unified_score.get("rsi_raw")
+        if rsi is not None and 45 < rsi < 70:
+            mom_score, mom_label, mom_value = 1, "✅ Bonne dynamique", f"RSI {rsi:.0f}"
+        elif rsi is not None:
+            mom_score, mom_label, mom_value = 0, "❌ Dynamique faible ou tendue", f"RSI {rsi:.0f}"
+        else:
+            mom_score, mom_label, mom_value = 0, "❓ Donnée indisponible", "N/A"
+        details.append({"dim": "Momentum", "score": mom_score, "label": mom_label, "value": mom_value})
+
+        struct_score = 1 if unified_score.get("structure", -1) > 0 else 0
+        info = self.dm.analyze_ticker(ticker)
+        if info and info["sma20"] and info["prix"]:
+            st_label = "✅ Prix > SMA20" if struct_score == 1 else "❌ Prix < SMA20"
+            st_value = f"{info['prix']:.2f}€ vs SMA20 {info['sma20']:.2f}€"
+        else:
+            st_label, st_value = "❓ Donnée indisponible", "N/A"
+        details.append({"dim": "Structure", "score": struct_score, "label": st_label, "value": st_value})
+
+        lead_score = 1 if unified_score.get("leadership", -2) > 0 else 0
+        rs = self.dm.relative_strength_slope(ticker, 14)
+        if rs is not None:
+            lead_label = "✅ Surperforme le World" if lead_score == 1 else "❌ Sous-performe le World"
+            lead_value = f"Pente : {rs:+.5f}"
+        else:
+            lead_label, lead_value = "❓ Donnée indisponible", "N/A"
+        details.append({"dim": "Leadership", "score": lead_score, "label": lead_label, "value": lead_value})
+
+        reg_score = regime.get("confirmed_score", 0)
+        macro_ok = reg_score >= 1
+        macro_label = f"✅ Environnement favorable ({regime['confirmed_label']})" if macro_ok else f"❌ Environnement difficile ({regime['confirmed_label']})"
+        details.append({"dim": "Macro", "score": 1 if macro_ok else 0, "label": macro_label, "value": f"Score {reg_score:+d}/5"})
+
+        vol = self.qre.rolling_volatility(ticker, 30)
+        if vol is not None:
+            risk_ok = vol < 0.25
+            risk_label = f"✅ Agitation acceptable ({vol*100:.1f}%)" if risk_ok else f"❌ Très agité ({vol*100:.1f}%)"
+            risk_value = f"{vol*100:.1f}% ann."
+        else:
+            risk_label, risk_value = "❓ Donnée indisponible", "N/A"
+        details.append({"dim": "Risque", "score": 1 if (vol is not None and vol < 0.25) else 0, "label": risk_label, "value": risk_value})
+
+        total = sum(d["score"] for d in details)
+        if total >= 4:
+            verdict, verdict_cls = "✅ Conditions très favorables --- Maintien recommandé", "verdict-green"
+        elif total >= 3:
+            verdict, verdict_cls = "🟡 Conditions correctes --- Maintien avec surveillance", "verdict-orange"
+        elif total >= 2:
+            verdict, verdict_cls = "🟠 Conditions mitigées --- Prudence conseillée", "verdict-orange"
+        else:
+            verdict, verdict_cls = "🔴 Conditions défavorables --- Réduction recommandée", "verdict-red"
+        return {"total": total, "details": details, "verdict": verdict, "verdict_cls": verdict_cls}
+
 # =============================================================================
 # MODULE 18 : INDICATOR ENGINE (indicateurs complets pour Decision Engine)
 # =============================================================================
