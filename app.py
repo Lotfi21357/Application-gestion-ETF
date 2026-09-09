@@ -1193,18 +1193,14 @@ class PersistenceManager:
               score_regime, round(poids_sat, 4)))
         self._conn.commit()
         self._history_cache = None
-
         # Tentative de push GitHub, mais on ne bloque pas en cas d'échec
         if self._github_ok:
             try:
                 self._push_to_github(self.load_history())
             except Exception as e:
-                # On affiche un avertissement dans la console (ou on pourrait le remonter)
                 print(f"⚠️ Échec de la synchronisation GitHub : {e}")
-                # Mais on ne fait pas échouer la sauvegarde locale
         return True
     except Exception as e:
-        # Affiche l'erreur dans l'interface Streamlit (utile pour le débogage)
         st.error(f"Erreur lors de l'enregistrement : {e}")
         return False
 
