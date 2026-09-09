@@ -1,13 +1,16 @@
 # =============================================================================
-# COCKPIT DÉCISIONNEL BOURSIER v6.5 — "ALERTE QUANT & ALLOCATION"
+# COCKPIT DÉCISIONNEL BOURSIER v6.4 — "ALERTE QUANT & ALLOCATION"
 # =============================================================================
-# v6.5 : Corrections majeures
-#   • PortfolioConfigManager.load_positions() garantit la présence des 5 ETF
-#     (WMMS.DE, DCAM.PA, MWRD.PA, KRW.PA, CHIP.PA) même si le fichier est incomplet
-#   • Screener : affiche désormais TOUS les ETFs de la bibliothèque (même ceux
-#     sans données historiques), avec score 0 et métriques N/A
-#   • Suppression du filtre if yf_ticker not in self.dm.data
-#   • Conservation de l'intégralité des fonctionnalités v6.4
+# v6.4 : Intégration complète de l'univers ETF Linxea Spirit 2
+#   • Correction ISIN et nom WMMS.DE (IE000AZV0AS3)
+#   • Suppression définitive de WMMS.XETRA
+#   • Ajout de USTH.PA manquant
+#   • ETF_UNIVERSE complet (tous les fonds disponibles)
+#   • Normalisation par ISIN
+#   • infer_region() améliorée
+#   • infer_theme() plus précise
+#   • get_working_ticker() pour utiliser les fallbacks
+#   • Tous les modules conservés et adaptés
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -36,7 +39,7 @@ except ImportError:
     PYGITHUB_OK = False
 
 st.set_page_config(
-    page_title="Cockpit v6.5 · Alerte Quant & Allocation",
+    page_title="Cockpit v6.4 · Alerte Quant & Allocation",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -1122,28 +1125,21 @@ class PortfolioConfigManager:
         self.file_path = file_path
 
     def load_positions(self) -> List[Dict]:
-        # Positions par défaut (garanties)
-        default_positions = [
-            {"ticker": "WMMS.DE", "parts": 461.9561, "prm": 13.582, "account": "AV"},
-            {"ticker": "DCAM.PA", "parts": 508.0000, "prm": 4.983, "account": "PEA"},
-            {"ticker": "MWRD.PA", "parts": 16.6229, "prm": 149.718, "account": "AV"},
-            {"ticker": "KRW.PA", "parts": 14.8501, "prm": 142.370, "account": "AV"},
-            {"ticker": "CHIP.PA", "parts": 21.4922, "prm": 99.159, "account": "AV"},
-        ]
         try:
             if os.path.exists(self.file_path) and os.stat(self.file_path).st_size > 0:
                 with open(self.file_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, list) and data:
-                    # Fusion : on ajoute les positions manquantes (par ticker)
-                    existing_tickers = {pos["ticker"] for pos in data}
-                    for default_pos in default_positions:
-                        if default_pos["ticker"] not in existing_tickers:
-                            data.append(default_pos)
                     return data
         except Exception:
             pass
-        return default_positions
+        return [
+            {"ticker": "WMMS.DE",   "parts": 461.9561, "prm": 13.582, "account": "AV"},
+            {"ticker": "DCAM.PA",   "parts": 508.0000, "prm": 4.983,  "account": "PEA"},
+            {"ticker": "MWRD.PA",   "parts": 16.6229,  "prm": 149.718, "account": "AV"},
+            {"ticker": "KRW.PA",    "parts": 14.8501,  "prm": 142.370, "account": "AV"},
+            {"ticker": "CHIP.PA",   "parts": 21.4922,  "prm": 99.159,  "account": "AV"},
+        ]
 
     def save_positions(self, positions: List[Dict]) -> bool:
         try:
@@ -2426,7 +2422,7 @@ class StreamlitUI:
         return "+" if v >= 0 else ""
 
     def render_sidebar(self) -> Tuple[bool, List[Dict], float, float, float]:
-        st.sidebar.markdown("## ⚙ Paramètres v6.5")
+        st.sidebar.markdown("## ⚙ Paramètres v6.4")
         mode_direct = st.sidebar.toggle("🔌 Mode Direct (Vue Brute)", value=False)
         st.sidebar.markdown("---")
         cap = st.sidebar.number_input("Capital investi (€)", value=st.session_state["cfg_capital_reel"], step=100.0, format="%.2f", key="input_capital_reel")
@@ -2531,7 +2527,7 @@ class StreamlitUI:
         st.markdown('<div style="display:flex;align-items:baseline;gap:1rem;margin-bottom:.2rem;">'
                     '<span style="font-family:Space Mono;font-size:1.6rem;font-weight:700;color:#D4AF37;">◈</span>'
                     '<span style="font-size:1.5rem;font-weight:700;color:#E2E8F0;">COCKPIT DÉCISIONNEL</span>'
-                    '<span style="font-family:Space Mono;font-size:.9rem;color:#6B7585;">v6.5 · ALERTE QUANT</span></div>', unsafe_allow_html=True)
+                    '<span style="font-family:Space Mono;font-size:.9rem;color:#6B7585;">v6.4 · ALERTE QUANT</span></div>', unsafe_allow_html=True)
         c1, c2 = st.columns([3, 1])
         with c1:
             st.caption(f"Prix live · {now.strftime('%d/%m/%Y %H:%M:%S')} (Paris) · Cache 30s/90s")
@@ -2721,7 +2717,7 @@ class StreamlitUI:
         if mwr_adj is not None:
             gap = bench.get("gap", 0.0) or 0.0
             gc = "#22C55E" if gap >= 0 else "#FF3131"
-            st.markdown(f'<div class="pedagogy-box"><div class="pedagogy-title">🆕 v6.5 --- Benchmark MWR Cash-Flow Adjusted</div>'
+            st.markdown(f'<div class="pedagogy-box"><div class="pedagogy-title">🆕 v6.4 --- Benchmark MWR Cash-Flow Adjusted</div>'
                         f'Le "Gap vs World" est calculé en simulant l\'achat de MWRD.PA aux mêmes dates et montants que vos flux réels. '
                         f'<b>World MWR = {s(mwr_adj)}{mwr_adj:.2f}%</b> · '
                         f'<b style="color:{gc};">Votre Alpha = {s(gap)}{gap:.2f}%</b></div>', unsafe_allow_html=True)
@@ -3385,25 +3381,26 @@ class StreamlitUI:
             scores = []
             for ticker, meta in ETF_LIBRARY.items():
                 yf_ticker = meta.get("yf", ticker)
-                # On tente le score même si les données sont manquantes
+                if yf_ticker not in self.dm.data:
+                    continue
                 res = self.signal.compute_score(yf_ticker)
-                # Si aucune donnée, res = {"score": 0, "metrics": {}}
-                # On ajoute quand même l'entrée
+                if res["score"] == 0 and not res["metrics"]:
+                    continue
                 scores.append({
                     "Ticker": ticker,
                     "Nom": meta.get("nom", ""),
                     "Catégorie": meta.get("category", ""),
                     "Thème": meta.get("theme", ""),
                     "Score": res["score"],
-                    "Momentum 6M": f"{res['metrics'].get('mom_6m', 0):.1f}%" if res['metrics'] else "N/A",
-                    "Force Relative": f"{res['metrics'].get('rel_strength', 0):.1f}%" if res['metrics'] else "N/A",
-                    "Volatilité": f"{res['metrics'].get('volatility', 0):.1f}%" if res['metrics'] else "N/A",
-                    "Sharpe": f"{res['metrics'].get('sharpe', 0):.2f}" if res['metrics'] else "N/A",
-                    "Drawdown": f"{res['metrics'].get('max_drawdown_1y', 0):.1f}%" if res['metrics'] else "N/A",
-                    "Corr 1M": f"{res['metrics'].get('corr_1m', 0):.2f}" if res['metrics'] and res['metrics'].get('corr_1m') is not None else "N/A",
-                    "Corr 3M": f"{res['metrics'].get('corr_3m', 0):.2f}" if res['metrics'] and res['metrics'].get('corr_3m') is not None else "N/A",
-                    "Corr 6M": f"{res['metrics'].get('corr_6m', 0):.2f}" if res['metrics'] and res['metrics'].get('corr_6m') is not None else "N/A",
-                    "Corr 1Y": f"{res['metrics'].get('corr_1y', 0):.2f}" if res['metrics'] and res['metrics'].get('corr_1y') is not None else "N/A",
+                    "Momentum 6M": f"{res['metrics'].get('mom_6m', 0):.1f}%",
+                    "Force Relative": f"{res['metrics'].get('rel_strength', 0):.1f}%",
+                    "Volatilité": f"{res['metrics'].get('volatility', 0):.1f}%",
+                    "Sharpe": f"{res['metrics'].get('sharpe', 0):.2f}",
+                    "Drawdown": f"{res['metrics'].get('max_drawdown_1y', 0):.1f}%",
+                    "Corr 1M": f"{res['metrics'].get('corr_1m', 0):.2f}" if res['metrics'].get('corr_1m') is not None else "N/A",
+                    "Corr 3M": f"{res['metrics'].get('corr_3m', 0):.2f}" if res['metrics'].get('corr_3m') is not None else "N/A",
+                    "Corr 6M": f"{res['metrics'].get('corr_6m', 0):.2f}" if res['metrics'].get('corr_6m') is not None else "N/A",
+                    "Corr 1Y": f"{res['metrics'].get('corr_1y', 0):.2f}" if res['metrics'].get('corr_1y') is not None else "N/A",
                 })
             df_scores = pd.DataFrame(scores).sort_values("Score", ascending=False)
 
@@ -3485,7 +3482,7 @@ class StreamlitUI:
             s = self._sign
             mode_txt = "🔌 MODE DIRECT" if mode_direct else "Ajust. patrimonial actif"
             persist = "GitHub Gist + SQLite" if self.pm.status == "github" else "SQLite local"
-            st.caption(f"◈ Cockpit v6.5 · Alerte Quant · {mode_txt} · "
+            st.caption(f"◈ Cockpit v6.4 · Alerte Quant · {mode_txt} · "
                        f"Régime : {regime_label} · Capital {capital:,.2f}€ · Persistance : {persist} · {live_ok}/{live_total} prix live · "
                        f"Benchmark : MWR Cash-Flow Adjusted · Outil personnel --- Ne constitue pas un conseil en investissement")
         with col_f2:
