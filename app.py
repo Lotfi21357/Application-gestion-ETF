@@ -10,6 +10,7 @@
 #   • Fallbacks étendus pour tous les ETF (vrais tickers alternatifs)
 #   • Screener : distinction Score=0 vs Données indisponibles (N/A)
 #   • Toutes les fonctionnalités v6.8 conservées
+#   • AJOUT : Comparaison hebdomadaire portefeuille vs World (section dédiée)
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -182,10 +183,9 @@ ETF_UNIVERSE = {
 }
 
 # ---- EXISTING_ETFS : fonds détenus ou suivis (avec initial_target, etc.) ----
-# CORRECTION : DCAM.PA et MWRD.PA n'ont plus d'ISIN erroné pour éviter d'écraser CHIP.PA et KRW.PA
 EXISTING_ETFS = {
     "DCAM.PA": {
-        "isin": "",  # Supprimé l'ISIN erroné qui était LU1900066033 (celui de CHIP)
+        "isin": "",
         "nom": "MSCI World PEA",
         "name": "Amundi MSCI World UCITS PEA",
         "yf": "DCAM.PA",
@@ -198,7 +198,7 @@ EXISTING_ETFS = {
         "initial_target": 0.183
     },
     "MWRD.PA": {
-        "isin": "",  # Supprimé l'ISIN erroné qui était LU1900066975 (celui de KRW)
+        "isin": "",
         "nom": "MSCI World AV",
         "name": "Amundi MSCI World UCITS DR USD",
         "yf": "MWRD.PA",
@@ -2030,7 +2030,7 @@ class QuantAlertEngine:
         }
 
 # -----------------------------------------------------------------------------
-# MODULE 12 : PEDAGOGIC ENGINE (inchangé)
+# MODULE 12 : PEDAGOGIC ENGINE (ajout get_portfolio_weekly_performances)
 # -----------------------------------------------------------------------------
 class PedagogicEngine:
     def translate_volatility(self, vol: Optional[float], asset_name: str) -> Dict:
@@ -2143,6 +2143,76 @@ class PedagogicEngine:
         sat_ret = sat_ret.iloc[-n:]; world_ret = world_ret.iloc[-n:]
         labels = ["En cours" if i == n-1 else f"S-{n-1-i}" for i in range(n)]
         return labels, list(sat_ret.values), list(world_ret.values)
+
+    def get_portfolio_weekly_performances(self, dm: DataManager, positions: List[Dict], n_weeks: int = 5) -> Tuple[List[str], List[float], List[float]]:
+        """
+        Calcule les performances hebdomadaires du portefeuille global (pondéré par les parts)
+        vs le MSCI World.
+        positions : liste de dict avec 'ticker' et 'parts'
+        Retourne : labels, perf_portefeuille (%), perf_world (%)
+        """
+        # Récupérer les séries de prix pour chaque ticker
+        price_series = {}
+        for pos in positions:
+            ticker = pos.get('ticker')
+            if not ticker:
+                continue
+            meta = ETF_LIBRARY.get(ticker, {})
+            yf_ticker = meta.get('yf', ticker)
+            df = dm.data.get(yf_ticker)
+            if df is not None and not df.empty and 'Close' in df.columns:
+                price_series[ticker] = df['Close'].dropna()
+        if not price_series:
+            return [], [], []
+
+        # Aligner les dates communes
+        common_dates = None
+        for s in price_series.values():
+            if common_dates is None:
+                common_dates = s.index
+            else:
+                common_dates = common_dates.intersection(s.index)
+        if common_dates is None or len(common_dates) < 10:
+            return [], [], []
+
+        # Calculer la valeur totale du portefeuille chaque jour
+        total_value = pd.Series(index=common_dates, dtype=float)
+        for ticker, s in price_series.items():
+            parts = next((pos['parts'] for pos in positions if pos.get('ticker') == ticker), 0)
+            if parts == 0:
+                continue
+            s_aligned = s.loc[common_dates]
+            total_value += s_aligned * parts
+        if total_value.empty:
+            return [], [], []
+
+        # Resampler par semaine (dernier jour de la semaine)
+        port_weekly = total_value.resample('W').last()
+
+        # World (on n'exclut rien)
+        world = get_world_series(dm, exclude_ticker=None)
+        if world.empty:
+            return [], [], []
+        world_weekly = world.resample('W').last()
+
+        # Aligner les semaines communes
+        common_weeks = port_weekly.index.intersection(world_weekly.index)
+        if len(common_weeks) < 2:
+            return [], [], []
+        port_weekly = port_weekly.loc[common_weeks]
+        world_weekly = world_weekly.loc[common_weeks]
+
+        # Calculer les rendements hebdomadaires
+        port_ret = port_weekly.pct_change().dropna() * 100
+        world_ret = world_weekly.pct_change().dropna() * 100
+        n = min(n_weeks, len(port_ret))
+        if n == 0:
+            return [], [], []
+        port_ret = port_ret.iloc[-n:]
+        world_ret = world_ret.iloc[-n:]
+
+        labels = ["En cours" if i == n-1 else f"S-{n-1-i}" for i in range(n)]
+        return labels, list(port_ret.values), list(world_ret.values)
 
     def translate_leadership(self, nom: str, weekly_gaps: List[float]) -> Dict:
         if not weekly_gaps:
@@ -2493,7 +2563,7 @@ def plot_relative_perf(dm: DataManager, ticker: str, nom: str) -> Optional[go.Fi
     return fig
 
 # -----------------------------------------------------------------------------
-# MODULE 16 : STREAMLIT UI (modifications pour utiliser get_world_series)
+# MODULE 16 : STREAMLIT UI (ajout render_portfolio_leadership_comparison)
 # -----------------------------------------------------------------------------
 class StreamlitUI:
     def __init__(self, dm: DataManager, pm: PersistenceManager,
@@ -2819,6 +2889,31 @@ class StreamlitUI:
                         f'Le "Gap vs World" est calculé en simulant l\'achat de MWRD.PA aux mêmes dates et montants que vos flux réels. '
                         f'<b>World MWR = {s(mwr_adj)}{mwr_adj:.2f}%</b> · '
                         f'<b style="color:{gc};">Votre Alpha = {s(gap)}{gap:.2f}%</b></div>', unsafe_allow_html=True)
+
+    # ---- NOUVELLE SECTION : Performance hebdomadaire du portefeuille vs World ----
+    def render_portfolio_leadership_comparison(self, ptf: Dict):
+        st.markdown("## 📈 Performance du Portefeuille vs MSCI World")
+        positions = ptf["positions"]
+        labels, port_perfs, world_perfs = self.pde.get_portfolio_weekly_performances(self.dm, positions, n_weeks=5)
+        if not labels:
+            st.info("Données hebdomadaires insuffisantes pour le portefeuille (besoin d'au moins 2 semaines de données).")
+            return
+
+        # Graphique
+        fig = plot_weekly_leadership(labels, port_perfs, world_perfs, "Portefeuille", color_sat="#D4AF37")
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+        # Verdict
+        gaps = [p - w for p, w in zip(port_perfs, world_perfs)]
+        verdict = self.pde.translate_leadership("Portefeuille", gaps)
+        level_color = {"green": "#22C55E", "orange": "#F97316", "red": "#FF3131"}.get(verdict["level"], "#6B7585")
+        level_bg = {"green": "rgba(34,197,94,.1)", "orange": "rgba(249,115,22,.1)", "red": "rgba(255,49,49,.1)"}.get(verdict["level"], "rgba(107,117,133,.1)")
+        st.markdown(f'<div style="background:{level_bg};border:1px solid {level_color};border-radius:10px;padding:1rem;margin:.5rem 0;">'
+                    f'<div style="font-weight:700;font-size:1.1rem;color:{level_color};">{verdict["message"]}</div>'
+                    f'<div style="font-size:.9rem;color:#8892AA;margin:.4rem 0;">{verdict["detail"]}</div>'
+                    f'<div style="font-size:.9rem;color:#CBD5E1;">💡 {verdict["action"]}</div></div>', unsafe_allow_html=True)
+
+    # ---- Fin nouvelle section ----
 
     def render_equity_curve_section(self, ptf: Dict, regime: Dict, positions_conf: List[Dict]):
         st.markdown("## 📈 Historique de votre capital")
@@ -3736,6 +3831,11 @@ def main():
                         f'<span style="font-size:.85rem;">→ Vérifiez la section Leadership ci-dessous.</span></div>', unsafe_allow_html=True)
         st.markdown(f'<div class="phase-banner" style="background:{phase_color};color:white;">{phase_text}</div>', unsafe_allow_html=True)
         ui.render_command_center(ptf, bench, mode_direct, pm)
+        
+        # ---- NOUVEAU : Performance hebdomadaire du portefeuille vs World ----
+        ui.render_portfolio_leadership_comparison(ptf)
+        # ----------------------------------------------------------------
+        
         ui.render_equity_curve_section(ptf, regime, positions_conf)
         ui.render_risk_dashboard(ptf)
         st.markdown("## 🧠 Analyse des ETF Satellites")
