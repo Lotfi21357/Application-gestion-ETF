@@ -1,5 +1,5 @@
 # =============================================================================
-# COCKPIT DÉCISIONNEL BOURSIER v6.9 — "DATA ENGINE FIABLE"
+# COCKPIT DÉCISIONNEL BOURSIER v6.9 — "DATA ENGINE FIABLE" + ALERTE QUANT V2 + BACKTEST
 # =============================================================================
 # v6.9 : Corrections majeures
 #   • Benchmark World unique : MWRD.PA (WMMS exclu de WORLD_TICKERS)
@@ -14,6 +14,8 @@
 #   • FIX : get_portfolio_weekly_performances utilise les fallbacks et aligne les dates
 #   • MWR par ancrage (au lieu de figé)
 #   • Corrections tickers du screener (suppressions, corrections, sécurisation)
+#   • NOUVEAU : Alerte Quantitative v2 (Decision Engine)
+#   • NOUVEAU : Backtest & Calibration (Priorité 3)
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -41,6 +43,13 @@ try:
     PYGITHUB_OK = True
 except ImportError:
     PYGITHUB_OK = False
+
+try:
+    from sklearn.linear_model import Ridge
+    from sklearn.preprocessing import StandardScaler
+    SKLEARN_OK = True
+except ImportError:
+    SKLEARN_OK = False
 
 st.set_page_config(
     page_title="Cockpit v6.9 · Data Engine Fiable",
@@ -101,8 +110,21 @@ section[data-testid="stSidebar"] { background-color: #22252E; border-right: 1px 
 _ANCHOR_DATE = "2026-09-08"   # date de référence connue
 _ANCHOR_PERF = 17.15          # performance MWR constatée à cette date (%)
 
-HISTORICAL_DAYS = 1200  # suffisant pour 3 ans + marges
+HISTORICAL_DAYS = 1500  # augmenté pour backtest et calibration
 BENCHMARK_WORLD_TICKER = "MWRD.PA"  # benchmark unique
+
+# --- Nouvelles constantes Alerte Quantitative v2 ---
+LINXEA_CUTOFF_HOUR = 16
+LINXEA_CUTOFF_MINUTE = 30
+
+# Seuils initiaux (À CALIBRER — voir section 11)
+CRASH_THRESHOLDS = {"vol_ratio": 1.3, "dd_5d": -0.05}
+CRASH_LEVELS = [(0, 1, "LOW"), (2, 3, "MODERATE"), (4, 5, "HIGH"), (6, 7, "CRITICAL")]
+UNDERPERF_THRESHOLDS = {"alpha20": -0.03, "alpha60": -0.02}
+
+# Hystérésis : seuils différents pour sortir vs réentrer
+DECISION_EXIT_SCORE = 5
+DECISION_REENTER_SCORE = 2
 
 # ---- ETF_UNIVERSE : tous les fonds disponibles sur Linxea Spirit 2 ----
 ETF_UNIVERSE = {
@@ -1948,7 +1970,7 @@ class PortfolioEngine:
             return weighted_cagr, any_fallback
 
 # -----------------------------------------------------------------------------
-# MODULE 11 : QUANT ALERT ENGINE (inchangé)
+# MODULE 11 : QUANT ALERT ENGINE (ancien — conservé pour compatibilité mais plus utilisé)
 # -----------------------------------------------------------------------------
 class QuantAlertEngine:
     def __init__(self, dm: DataManager):
@@ -2316,299 +2338,887 @@ class PedagogicEngine:
             return {"emoji": "🔴", "level": "red", "message": "Décrochage fort des leaders.",
                     "detail": f"{', '.join([a['Sentinelle'] for a in alerts])} sous SMA20.", "action": "Réduction conseillée."}
 
-# -----------------------------------------------------------------------------
-# MODULE 13 : STRATEGIC ENGINE (inchangé)
-# -----------------------------------------------------------------------------
-class StrategicEngine:
-    def __init__(self, dm: DataManager, mre: MarketRegimeEngine, qre: QuantRiskEngine):
-        self.dm = dm; self.mre = mre; self.qre = qre
+# =============================================================================
+# MODULE 18 : INDICATOR ENGINE (indicateurs complets pour Decision Engine)
+# =============================================================================
+class IndicatorEngine:
+    def __init__(self, dm: DataManager):
+        self.dm = dm
 
-    def compute(self, ticker: str, unified_score: Dict, regime: Dict) -> Dict:
-        details = []
-        rsi = unified_score.get("rsi_raw")
-        if rsi is not None and 45 < rsi < 70:
-            mom_score, mom_label, mom_value = 1, "✅ Bonne dynamique", f"RSI {rsi:.0f}"
-        elif rsi is not None:
-            mom_score, mom_label, mom_value = 0, "❌ Dynamique faible ou tendue", f"RSI {rsi:.0f}"
-        else:
-            mom_score, mom_label, mom_value = 0, "❓ Donnée indisponible", "N/A"
-        details.append({"dim": "Momentum", "score": mom_score, "label": mom_label, "value": mom_value})
+    def _series(self, ticker: str) -> pd.Series:
+        df = self.dm.data.get(ticker)
+        if df is None or df.empty or "Close" not in df.columns:
+            return pd.Series(dtype=float)
+        return df["Close"].dropna().sort_index()
 
-        struct_score = 1 if unified_score.get("structure", -1) > 0 else 0
-        info = self.dm.analyze_ticker(ticker)
-        if info and info["sma20"] and info["prix"]:
-            st_label = "✅ Prix > SMA20" if struct_score == 1 else "❌ Prix < SMA20"
-            st_value = f"{info['prix']:.2f}€ vs SMA20 {info['sma20']:.2f}€"
-        else:
-            st_label, st_value = "❓ Donnée indisponible", "N/A"
-        details.append({"dim": "Structure", "score": struct_score, "label": st_label, "value": st_value})
+    def compute(self, ticker: str, world_ticker: str = None) -> Optional[Dict]:
+        close = self._series(ticker)
+        if close.empty or len(close) < 60:
+            return None
+        world = get_world_series(self.dm, exclude_ticker=ticker if ticker == BENCHMARK_WORLD_TICKER else None)
+        common = close.index.intersection(world.index) if not world.empty else pd.Index([])
 
-        lead_score = 1 if unified_score.get("leadership", -2) > 0 else 0
-        rs = self.dm.relative_strength_slope(ticker, 14)
-        if rs is not None:
-            lead_label = "✅ Surperforme le World" if lead_score == 1 else "❌ Sous-performe le World"
-            lead_value = f"Pente : {rs:+.5f}"
-        else:
-            lead_label, lead_value = "❓ Donnée indisponible", "N/A"
-        details.append({"dim": "Leadership", "score": lead_score, "label": lead_label, "value": lead_value})
+        def ret_n(s, n):
+            return float(s.iloc[-1] / s.iloc[-n-1] - 1) if len(s) > n else None
 
-        reg_score = regime.get("confirmed_score", 0)
-        macro_ok = reg_score >= 1
-        macro_label = f"✅ Environnement favorable ({regime['confirmed_label']})" if macro_ok else f"❌ Environnement difficile ({regime['confirmed_label']})"
-        details.append({"dim": "Macro", "score": 1 if macro_ok else 0, "label": macro_label, "value": f"Score {reg_score:+d}/5"})
+        def alpha_n(n):
+            if len(common) <= n:
+                return None
+            a = close.loc[common]; w = world.loc[common]
+            ra = ret_n(a, n); rw = ret_n(w, n)
+            return (ra - rw) if (ra is not None and rw is not None) else None
 
-        vol = self.qre.rolling_volatility(ticker, 30)
-        if vol is not None:
-            risk_ok = vol < 0.25
-            risk_label = f"✅ Agitation acceptable ({vol*100:.1f}%)" if risk_ok else f"❌ Très agité ({vol*100:.1f}%)"
-            risk_value = f"{vol*100:.1f}% ann."
-        else:
-            risk_label, risk_value = "❓ Donnée indisponible", "N/A"
-        details.append({"dim": "Risque", "score": 1 if (vol is not None and vol < 0.25) else 0, "label": risk_label, "value": risk_value})
+        sma20 = close.rolling(20).mean().iloc[-1] if len(close) >= 20 else None
+        sma50 = close.rolling(50).mean().iloc[-1] if len(close) >= 50 else None
+        sma100 = close.rolling(100).mean().iloc[-1] if len(close) >= 100 else None
+        sma200 = close.rolling(200).mean().iloc[-1] if len(close) >= 200 else None
+        price = float(close.iloc[-1])
 
-        total = sum(d["score"] for d in details)
-        if total >= 4:
-            verdict, verdict_cls = "✅ Conditions très favorables --- Maintien recommandé", "verdict-green"
-        elif total >= 3:
-            verdict, verdict_cls = "🟡 Conditions correctes --- Maintien avec surveillance", "verdict-orange"
-        elif total >= 2:
-            verdict, verdict_cls = "🟠 Conditions mitigées --- Prudence conseillée", "verdict-orange"
-        else:
-            verdict, verdict_cls = "🔴 Conditions défavorables --- Réduction recommandée", "verdict-red"
-        return {"total": total, "details": details, "verdict": verdict, "verdict_cls": verdict_cls}
+        trend_score = 0
+        if sma20 is not None and price > sma20: trend_score += 1
+        if sma20 is not None and sma50 is not None and sma20 > sma50: trend_score += 1
+        if sma50 is not None and sma200 is not None and sma50 > sma200: trend_score += 1
+        if sma200 is not None and price > sma200: trend_score += 1
 
-# -----------------------------------------------------------------------------
-# MODULE 14 : FISCAL (inchangé)
-# -----------------------------------------------------------------------------
-def net_apres_impots(enveloppe: str, montant: float, val_poche: float, gain_poche: float) -> Tuple[float, str]:
-    if montant <= 0:
-        return 0.0, ""
-    if montant > val_poche:
-        return 0.0, "⚠ Montant supérieur à la valeur de la poche"
-    ratio_gain = gain_poche / val_poche if val_poche else 0
-    gain_retrait = montant * ratio_gain
-    now_tz = datetime.now(ZoneInfo("Europe/Paris"))
-    if enveloppe == "PEA":
-        limite = datetime(2031, 4, 1, tzinfo=ZoneInfo("Europe/Paris"))
-        if now_tz < limite:
-            return 0.0, "⚠ Retrait PEA impossible avant le 01/04/2031 (fermeture enveloppe)"
-        return montant - 0.172 * gain_retrait, ""
-    if enveloppe == "AV":
-        if now_tz < datetime(2033, 9, 17, tzinfo=ZoneInfo("Europe/Paris")):
-            return montant - 0.30 * gain_retrait, ""
-        ps = 0.172 * gain_retrait
-        ir = 0.128 * max(0, gain_retrait - 9200)
-        return montant - ps - ir, ""
-    return montant, ""
+        # Relative Strength
+        rs_ma20 = rs_ma50 = rs_val = None
+        if len(common) >= 50:
+            rs_series = (close.loc[common] / world.loc[common]).dropna()
+            if len(rs_series) >= 50:
+                rs_val = float(rs_series.iloc[-1])
+                rs_ma20 = float(rs_series.rolling(20).mean().iloc[-1])
+                rs_ma50 = float(rs_series.rolling(50).mean().iloc[-1])
 
-# -----------------------------------------------------------------------------
-# MODULE 15 : VISUALISATIONS (corrigées avec get_world_series)
-# -----------------------------------------------------------------------------
-_PLOTLY_BASE = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#CBD5E1", family="DM Sans"))
+        relative_trend_score = 0
+        a20, a60 = alpha_n(20), alpha_n(60)
+        if a20 is not None and a20 > 0: relative_trend_score += 1
+        if a60 is not None and a60 > 0: relative_trend_score += 1
+        if rs_val is not None and rs_ma20 is not None and rs_val > rs_ma20: relative_trend_score += 1
+        if rs_ma20 is not None and rs_ma50 is not None and rs_ma20 > rs_ma50: relative_trend_score += 1
 
-def plot_equity_curve(history: pd.DataFrame) -> Optional[go.Figure]:
-    if history.empty or "capital_cloture" not in history.columns:
-        return None
-    df = history.dropna(subset=["capital_cloture"]).copy()
-    if len(df) < 2:
-        return None
-    df["date_dt"] = pd.to_datetime(df["date"], errors="coerce")
-    df = df.dropna(subset=["date_dt"]).sort_values("date_dt")
-    fig = go.Figure()
-    regime_colors = {
-        "Euphorie": "rgba(168,85,247,.10)", "Expansion": "rgba(34,197,94,.10)",
-        "Neutre": "rgba(59,130,246,.08)", "Stress": "rgba(245,158,11,.10)",
-        "Contraction": "rgba(255,49,49,.12)"
-    }
-    if "regime" in df.columns:
-        prev = None
-        x0 = df["date_dt"].iloc[0]
-        for _, row in df.iterrows():
-            if row.get("regime") != prev and prev is not None:
-                fig.add_vrect(x0=x0, x1=row["date_dt"], fillcolor=regime_colors.get(prev, "rgba(255,255,255,.03)"), layer="below", line_width=0)
-                x0 = row["date_dt"]
-            prev = row.get("regime")
-        if prev:
-            fig.add_vrect(x0=x0, x1=df["date_dt"].iloc[-1], fillcolor=regime_colors.get(prev, "rgba(255,255,255,.03)"), layer="below", line_width=0)
-    fig.add_trace(go.Scatter(x=df["date_dt"], y=df["capital_cloture"], mode="lines+markers",
-                            line=dict(color="#D4AF37", width=2.5), marker=dict(size=5), name="Capital Clôture"))
-    if "perf_cumul" in df.columns and df["perf_cumul"].notna().any():
-        fig.add_trace(go.Scatter(x=df["date_dt"], y=df["perf_cumul"], mode="lines",
-                                line=dict(color="#3B82F6", width=1.5, dash="dot"), name="Perf Cumul (%)", yaxis="y2"))
-    fig.update_layout(
-        **_PLOTLY_BASE,
-        title=dict(text="<b>Évolution de votre capital</b>", font=dict(size=13, color="#6B7585")),
-        margin=dict(t=40, b=30, l=60, r=60), height=280,
-        legend=dict(font=dict(size=10), bgcolor="rgba(0,0,0,0)", x=0, y=1.15, orientation="h"),
-        xaxis=dict(gridcolor="#2E3340", showgrid=True),
-        yaxis=dict(gridcolor="#2E3340", showgrid=True, ticksuffix="€", title="Capital (€)"),
-        yaxis2=dict(overlaying="y", side="right", showgrid=False, ticksuffix="%", title="Perf (%)")
-    )
-    return fig
+        # Momentum + accélération
+        mom5 = ret_n(close, 5); mom20 = ret_n(close, 20); mom60 = ret_n(close, 60)
+        mom20_5dago = None
+        if len(close) > 25:
+            past = close.iloc[:-5]
+            mom20_5dago = ret_n(past, 20)
+        mom_accel = (mom20 - mom20_5dago) if (mom20 is not None and mom20_5dago is not None) else None
 
-def plot_weekly_leadership(labels: List[str], sat_perfs: List[float], world_perfs: List[float],
-                           sat_name: str, color_sat: str = "#D4AF37") -> go.Figure:
-    fig = go.Figure()
-    bar_colors_sat = ["#22C55E" if v > 0 else "#FF3131" for v in sat_perfs]
-    fig.add_trace(go.Bar(x=labels, y=sat_perfs, name=sat_name, marker_color=bar_colors_sat,
-                         text=[f"{v:+.1f}%" for v in sat_perfs], textposition="outside"))
-    bar_colors_world = ["rgba(59,130,246,.7)" if v > 0 else "rgba(59,130,246,.4)" for v in world_perfs]
-    fig.add_trace(go.Bar(x=labels, y=world_perfs, name="MSCI World", marker_color=bar_colors_world,
-                         text=[f"{v:+.1f}%" for v in world_perfs], textposition="outside"))
-    fig.add_hline(y=0, line_dash="dot", line_color="#4B5563", opacity=0.8)
-    fig.update_layout(
-        **_PLOTLY_BASE, barmode="group", bargap=0.20, bargroupgap=0.05,
-        title=dict(text=f"<b>Leadership hebdomadaire : {sat_name} vs MSCI World</b>", font=dict(size=13, color="#6B7585")),
-        margin=dict(t=50, b=40, l=50, r=30), height=300,
-        legend=dict(font=dict(size=11), bgcolor="rgba(0,0,0,0)", x=0, y=1.12, orientation="h"),
-        xaxis=dict(gridcolor="#2E3340", showgrid=False), yaxis=dict(gridcolor="#2E3340", ticksuffix="%", zeroline=False)
-    )
-    return fig
+        # Drawdown
+        rmax = close.cummax()
+        dd_series = (close / rmax - 1)
+        dd_current = float(dd_series.iloc[-1])
+        dd_5d = ret_n(close, 5)
+        dd_10d = ret_n(close, 10)
+        dd_max20 = float(dd_series.iloc[-20:].min()) if len(dd_series) >= 20 else None
+        dd_max60 = float(dd_series.iloc[-60:].min()) if len(dd_series) >= 60 else None
+        dd_max120 = float(dd_series.iloc[-120:].min()) if len(dd_series) >= 120 else None
 
-def plot_correlation_heatmap(corr_df: pd.DataFrame) -> go.Figure:
-    short = {
-        "WMMS.DE": "WMMS", "MWRD.PA": "World", "DCAM.PA": "W-PEA",
-        "KRW.PA": "Korea", "CHIP.PA": "CHIP", "LYXTNOW.PA": "InfoTech", "IJPE.PA": "JapSC",
-        "CV9.PA": "EuVal", "LYXFINW.PA": "Fin"
-    }
-    labels = [short.get(c, c) for c in corr_df.columns]
-    fig = go.Figure(go.Heatmap(
-        z=corr_df.values.round(2), x=labels, y=labels,
-        colorscale=[[0, "#FF3131"], [0.5, "#252932"], [1, "#22C55E"]],
-        zmid=0, zmin=-1, zmax=1,
-        text=corr_df.values.round(2), texttemplate="%{text:.2f}",
-        hovertemplate="<b>%{y} / %{x}</b><br>ρ = %{z:.2f}<extra></extra>",
-        showscale=True,
-        colorbar=dict(tickfont=dict(color="#CBD5E1", size=9), thickness=12, len=0.8, bgcolor="rgba(0,0,0,0)")
-    ))
-    fig.update_layout(
-        **_PLOTLY_BASE,
-        title=dict(text="<b>Corrélation Pearson (60j)</b>", font=dict(size=12, color="#6B7585")),
-        margin=dict(t=40, b=10, l=60, r=20), height=220
-    )
-    return fig
+        # Volatilité
+        returns = close.pct_change().dropna()
+        vol20 = float(returns.iloc[-20:].std() * np.sqrt(252)) if len(returns) >= 20 else None
+        vol60 = float(returns.iloc[-60:].std() * np.sqrt(252)) if len(returns) >= 60 else None
+        vol120 = float(returns.iloc[-120:].std() * np.sqrt(252)) if len(returns) >= 120 else None
+        vol_ratio = (vol20 / vol60) if (vol20 and vol60) else None
+        vol_shock = (vol20 / vol120) if (vol20 and vol120) else None
 
-def plot_risk_contribution(rc: Dict) -> Optional[go.Figure]:
-    if not rc:
-        return None
-    short = {
-        "WMMS.DE": "WMMS", "MWRD.PA": "World", "DCAM.PA": "W-PEA",
-        "KRW.PA": "Korea", "CHIP.PA": "CHIP"
-    }
-    names = [short.get(tk, tk) for tk in rc]
-    values = [rc[tk]["rc_pct"] for tk in rc]
-    colors = ["#FF3131" if rc[tk]["flag"] else "#007BFF" for tk in rc]
-    fig = go.Figure(go.Bar(x=values, y=names, orientation="h", marker_color=colors,
-                           hovertemplate="%{y}: <b>%{x:.1f}%</b>"))
-    fig.add_vline(x=40, line_dash="dash", line_color="#FF3131",
-                  annotation_text="Seuil 40%", annotation_font=dict(color="#FF3131", size=9))
-    fig.update_layout(
-        **_PLOTLY_BASE,
-        title=dict(text="<b>Risk Contribution (%)</b>", font=dict(size=12, color="#6B7585")),
-        margin=dict(t=40, b=10, l=80, r=20), height=200,
-        xaxis=dict(gridcolor="#2E3340", ticksuffix="%"), yaxis=dict(gridcolor="rgba(0,0,0,0)")
-    )
-    return fig
+        # Beta / corrélation
+        beta60 = corr20 = corr60 = corr120 = None
+        if len(common) >= 60:
+            r_a = close.loc[common].pct_change().dropna()
+            r_w = world.loc[common].pct_change().dropna()
+            common_r = r_a.index.intersection(r_w.index)
+            if len(common_r) >= 60:
+                a60_ = r_a.loc[common_r].iloc[-60:]; w60_ = r_w.loc[common_r].iloc[-60:]
+                cov = np.cov(a60_, w60_)[0, 1]; var = np.var(w60_)
+                beta60 = float(cov / var) if var > 1e-12 else None
+            for n, name in [(20, "corr20"), (60, "corr60"), (120, "corr120")]:
+                if len(common_r) >= n:
+                    c = r_a.loc[common_r].iloc[-n:].corr(r_w.loc[common_r].iloc[-n:])
+                    if name == "corr20": corr20 = float(c) if pd.notna(c) else None
+                    elif name == "corr60": corr60 = float(c) if pd.notna(c) else None
+                    else: corr120 = float(c) if pd.notna(c) else None
 
-def plot_weight_indicator(current_pct: float, target_pct: float) -> go.Figure:
-    fig = go.Figure(go.Indicator(
-        mode="gauge+number+delta",
-        value=round(current_pct, 1),
-        number={"suffix": "%", "font": {"size": 26, "color": "#CBD5E1", "family": "Space Mono"}},
-        delta={"reference": target_pct, "relative": False, "increasing": {"color": "#F97316"},
-               "decreasing": {"color": "#22C55E"}, "suffix": "%", "valueformat": ".1f"},
-        title={"text": "Poids Actuel<br><span style='font-size:.8em;color:#6B7585'>vs Cible (or)</span>",
-               "font": {"size": 11, "color": "#8892AA"}},
-        gauge={
-            "axis": {"range": [0, 35], "tickcolor": "#6B7585", "tickfont": {"size": 9}, "nticks": 8},
-            "bar": {"color": "#007BFF", "thickness": 0.28},
-            "bgcolor": "rgba(0,0,0,0)", "borderwidth": 0,
-            "steps": [
-                {"range": [0, 5], "color": "rgba(255,49,49,.18)"},
-                {"range": [5, 15], "color": "rgba(249,115,22,.12)"},
-                {"range": [15, 25], "color": "rgba(34,197,94,.12)"},
-                {"range": [25, 35], "color": "rgba(212,175,55,.10)"}
-            ],
-            "threshold": {"line": {"color": "#D4AF37", "width": 4}, "thickness": 0.85,
-                          "value": round(target_pct, 1)}
+        # Z-score
+        z20 = None
+        if len(returns) >= 21:
+            r1d = returns.iloc[-1]
+            mu = returns.iloc[-21:-1].mean(); sd = returns.iloc[-21:-1].std()
+            z20 = float((r1d - mu) / sd) if sd > 1e-9 else None
+
+        rsi14 = None
+        if len(close) >= 15:
+            delta = close.diff()
+            gain = delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
+            loss = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False).mean()
+            rs_ = gain / loss.replace(0, np.nan)
+            rsi14 = float((100 - 100/(1+rs_)).iloc[-1])
+
+        return {
+            "ticker": ticker, "price": price, "date": close.index[-1],
+            "sma20": sma20, "sma50": sma50, "sma100": sma100, "sma200": sma200,
+            "trend_score": trend_score,
+            "alpha3": alpha_n(3), "alpha5": alpha_n(5), "alpha10": alpha_n(10),
+            "alpha20": a20, "alpha60": a60, "alpha120": alpha_n(120),
+            "rs": rs_val, "rs_ma20": rs_ma20, "rs_ma50": rs_ma50,
+            "relative_trend_score": relative_trend_score,
+            "mom5": mom5, "mom20": mom20, "mom60": mom60, "mom_accel": mom_accel,
+            "dd_current": dd_current, "dd_5d": dd_5d, "dd_10d": dd_10d,
+            "dd_max20": dd_max20, "dd_max60": dd_max60, "dd_max120": dd_max120,
+            "vol20": vol20, "vol60": vol60, "vol120": vol120,
+            "vol_ratio": vol_ratio, "vol_shock": vol_shock,
+            "beta60": beta60, "corr20": corr20, "corr60": corr60, "corr120": corr120,
+            "z20": z20, "rsi14": rsi14,
+            "n_history": len(close),
         }
-    ))
-    fig.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)", font={"color": "#CBD5E1", "family": "DM Sans"},
-        margin={"t": 50, "b": 10, "l": 20, "r": 20}, height=230
-    )
-    return fig
 
-def plot_alpha_bars(dm: DataManager, ticker: str, nom: str) -> Optional[go.Figure]:
-    """Écart quotidien vs le vrai World (via get_world_series)"""
-    world = get_world_series(dm, exclude_ticker=ticker)
-    if world.empty:
-        return None
-    sat_df = dm.data.get(ticker, pd.DataFrame())
-    if sat_df is None or sat_df.empty:
-        return None
-    wc = world
-    sc = sat_df["Close"].dropna()
-    common = sc.index.intersection(wc.index)
-    if len(common) < 17:
-        return None
-    common = common[-16:]
-    alpha = ((sc[common].pct_change() - wc[common].pct_change()) * 100).dropna().iloc[-15:]
-    if alpha.empty:
-        return None
-    fig = go.Figure(go.Bar(
-        x=[d.strftime("%d/%m") for d in alpha.index],
-        y=alpha.values,
-        marker_color=["#22C55E" if v > 0 else "#FF3131" for v in alpha.values]
-    ))
-    fig.add_hline(y=0, line_dash="dot", line_color="#6B7585", opacity=.6)
-    fig.update_layout(
-        **_PLOTLY_BASE,
-        title=dict(text=f"<b>Écart quotidien</b> : {nom} vs MSCI World --- 15 derniers jours",
-                   font=dict(size=11, color="#6B7585")),
-        margin=dict(t=35, b=25, l=55, r=15), height=200,
-        showlegend=False, xaxis=dict(gridcolor="#2E3340", showgrid=False),
-        yaxis=dict(gridcolor="#2E3340", ticksuffix="%")
-    )
-    return fig
+# =============================================================================
+# MODULE 19 : WORLD REGIME ENGINE (RISK_ON / NEUTRAL / RISK_OFF / CRASH)
+# =============================================================================
+class WorldRegimeEngine:
+    def __init__(self, dm: DataManager, ie: IndicatorEngine):
+        self.dm = dm
+        self.ie = ie
 
-def plot_relative_perf(dm: DataManager, ticker: str, nom: str) -> Optional[go.Figure]:
-    """Performance relative vs le vrai World (via get_world_series)"""
+    def get_regime(self) -> Dict:
+        world_tk = None
+        for wt in [BENCHMARK_WORLD_TICKER] + WORLD_TICKERS:
+            df = self.dm.data.get(wt)
+            if df is not None and not df.empty:
+                world_tk = wt
+                break
+        if world_tk is None:
+            return {"regime": "NEUTRAL", "reason": "Données World indisponibles", "indicators": {}}
+
+        # indicateurs "bruts" du World lui-même (pas d'alpha, il est comparé à lui-même)
+        close = self.dm.data[world_tk]["Close"].dropna()
+        sma20 = close.rolling(20).mean().iloc[-1] if len(close) >= 20 else None
+        sma50 = close.rolling(50).mean().iloc[-1] if len(close) >= 50 else None
+        sma200 = close.rolling(200).mean().iloc[-1] if len(close) >= 200 else None
+        price = float(close.iloc[-1])
+        returns = close.pct_change().dropna()
+        vol20 = returns.iloc[-20:].std() * np.sqrt(252) if len(returns) >= 20 else None
+        vol120 = returns.iloc[-120:].std() * np.sqrt(252) if len(returns) >= 120 else None
+        vol_shock = (vol20 / vol120) if (vol20 and vol120) else 1.0
+        rmax = close.cummax()
+        dd_current = float((close / rmax - 1).iloc[-1])
+
+        above20 = sma20 is not None and price > sma20
+        above50 = sma50 is not None and price > sma50
+        above200 = sma200 is not None and price > sma200
+        sma50_above200 = sma50 is not None and sma200 is not None and sma50 > sma200
+
+        if above200 and sma50_above200 and above20 and vol_shock < 1.2:
+            regime = "RISK_ON"
+        elif (not above50 and sma50 is not None and sma20 is not None and sma20 < sma50) or vol_shock > 1.3:
+            regime = "RISK_OFF"
+        else:
+            regime = "NEUTRAL"
+
+        if (not above200) and dd_current < -0.10 and vol_shock > 1.4:
+            regime = "CRASH"
+
+        return {
+            "regime": regime, "price": price, "sma20": sma20, "sma50": sma50, "sma200": sma200,
+            "vol_shock": round(vol_shock, 2) if vol_shock else None,
+            "drawdown": round(dd_current * 100, 2),
+            "world_ticker": world_tk,
+        }
+
+# =============================================================================
+# MODULE 20 : CRASH PROTECTION & UNDERPERFORMANCE ENGINES
+# =============================================================================
+class CrashProtectionEngine:
+    def compute(self, ind: Dict, world_regime: str) -> Dict:
+        score, reasons = 0, []
+        if ind["sma20"] and ind["price"] < ind["sma20"]:
+            score += 1; reasons.append("Prix < SMA20")
+        if ind["sma20"] and ind["sma50"] and ind["sma20"] < ind["sma50"]:
+            score += 1; reasons.append("SMA20 < SMA50")
+        if ind["alpha20"] is not None and ind["alpha20"] < 0:
+            score += 1; reasons.append(f"Alpha20 négatif ({ind['alpha20']*100:.1f}%)")
+        if ind["alpha60"] is not None and ind["alpha60"] < 0:
+            score += 1; reasons.append(f"Alpha60 négatif ({ind['alpha60']*100:.1f}%)")
+        if ind["vol_ratio"] is not None and ind["vol_ratio"] > CRASH_THRESHOLDS["vol_ratio"]:
+            score += 1; reasons.append(f"Vol20/Vol60 = {ind['vol_ratio']:.2f}")
+        if ind["dd_5d"] is not None and ind["dd_5d"] < CRASH_THRESHOLDS["dd_5d"]:
+            score += 1; reasons.append(f"Chute {ind['dd_5d']*100:.1f}% en 5j")
+        if world_regime in ("RISK_OFF", "CRASH"):
+            score += 1; reasons.append(f"World en régime {world_regime}")
+
+        level = "LOW"
+        for lo, hi, lbl in CRASH_LEVELS:
+            if lo <= score <= hi:
+                level = lbl
+        return {"score": score, "level": level, "reasons": reasons}
+
+
+class UnderperformanceEngine:
+    def compute(self, ind: Dict) -> Dict:
+        score, reasons = 0, []
+        a20, a60, a120 = ind.get("alpha20"), ind.get("alpha60"), ind.get("alpha120")
+        if a20 is not None and a20 < UNDERPERF_THRESHOLDS["alpha20"]:
+            score += 1; reasons.append(f"Alpha20 = {a20*100:.1f}%")
+        if a60 is not None and a60 < UNDERPERF_THRESHOLDS["alpha60"]:
+            score += 1; reasons.append(f"Alpha60 = {a60*100:.1f}%")
+        if a120 is not None and a120 < 0:
+            score += 1; reasons.append(f"Alpha120 = {a120*100:.1f}%")
+        if ind.get("relative_trend_score", 4) <= 1:
+            score += 1; reasons.append("Force relative faible")
+        return {"score": score, "max_score": 4, "reasons": reasons}
+
+# =============================================================================
+# MODULE 21 : EMPIRICAL ANALOG ENGINE (baseline historique — Priorité 2)
+# =============================================================================
+class EmpiricalAnalogEngine:
+    """
+    Recherche dans l'historique du ticker les jours où le crash_score (ou
+    underperf_score) était dans la même fourchette qu'aujourd'hui, puis
+    regarde ce qui s'est passé dans les N jours suivants (alpha vs World).
+    Ne fait AUCUNE prédiction — affiche un fait statistique avec sa taille
+    d'échantillon, comme demandé au point 29/33 de la spec.
+    """
+    def __init__(self, dm: DataManager, ie: IndicatorEngine):
+        self.dm = dm
+        self.ie = ie
+
+    def analyze(self, ticker: str, current_score: int, score_type: str = "crash",
+                horizon: int = 20, tolerance: int = 1) -> Dict:
+        df = self.dm.data.get(ticker)
+        world = get_world_series(self.dm, exclude_ticker=ticker)
+        if df is None or df.empty or world.empty:
+            return {"available": False}
+        close = df["Close"].dropna()
+        common = close.index.intersection(world.index)
+        if len(common) < 250:
+            return {"available": False}
+
+        close_c = close.loc[common]
+        world_c = world.loc[common]
+        returns = close_c.pct_change()
+
+        sma20 = close_c.rolling(20).mean()
+        sma50 = close_c.rolling(50).mean()
+        vol20 = returns.rolling(20).std() * np.sqrt(252)
+        vol60 = returns.rolling(60).std() * np.sqrt(252)
+        vol_ratio = vol20 / vol60
+        alpha20 = (close_c / close_c.shift(20) - 1) - (world_c / world_c.shift(20) - 1)
+        alpha60 = (close_c / close_c.shift(60) - 1) - (world_c / world_c.shift(60) - 1)
+        dd_5d = close_c / close_c.shift(5) - 1
+
+        # Reconstruction approximative du score historique jour par jour
+        hist_score = pd.Series(0, index=common)
+        hist_score += (close_c < sma20).astype(int)
+        hist_score += (sma20 < sma50).astype(int)
+        hist_score += (alpha20 < 0).astype(int)
+        hist_score += (alpha60 < 0).astype(int)
+        hist_score += (vol_ratio > CRASH_THRESHOLDS["vol_ratio"]).astype(int)
+        hist_score += (dd_5d < CRASH_THRESHOLDS["dd_5d"]).astype(int)
+
+        # Jours analogues (hors 20 derniers jours pour éviter chevauchement avec aujourd'hui)
+        mask = (hist_score - current_score).abs() <= tolerance
+        analog_dates = common[mask][:-horizon] if horizon < len(common) else common[mask]
+        analog_dates = [d for d in analog_dates if d in common[:-horizon]]
+
+        if len(analog_dates) < 15:
+            return {"available": False, "n_samples": len(analog_dates)}
+
+        future_alphas = []
+        for d in analog_dates:
+            try:
+                idx = common.get_loc(d)
+                if idx + horizon >= len(common):
+                    continue
+                d_future = common[idx + horizon]
+                etf_ret = close_c.loc[d_future] / close_c.loc[d] - 1
+                world_ret = world_c.loc[d_future] / world_c.loc[d] - 1
+                future_alphas.append(etf_ret - world_ret)
+            except Exception:
+                continue
+
+        if len(future_alphas) < 15:
+            return {"available": False, "n_samples": len(future_alphas)}
+
+        arr = np.array(future_alphas)
+        hit_rate_neg = float((arr < 0).mean())
+        expected_alpha = float(arr.mean())
+
+        if len(arr) < 30:
+            confidence = "LOW"
+        elif len(arr) < 75:
+            confidence = "MEDIUM"
+        else:
+            confidence = "HIGH"
+
+        if hit_rate_neg < 0.40:
+            proba_label = "FAIBLE"
+        elif hit_rate_neg < 0.60:
+            proba_label = "MODÉRÉE"
+        else:
+            proba_label = "ÉLEVÉE"
+
+        return {
+            "available": True, "n_samples": len(arr),
+            "expected_alpha": expected_alpha, "hit_rate_negative": hit_rate_neg,
+            "proba_label": proba_label, "confidence": confidence, "horizon": horizon,
+        }
+
+# =============================================================================
+# MODULE 22 : LINXEA EXECUTION ENGINE
+# =============================================================================
+class LinxeaExecutionEngine:
+    def __init__(self, dm: DataManager, analog: EmpiricalAnalogEngine):
+        self.dm = dm
+        self.analog = analog
+
+    def compute_execution_date(self, signal_dt: datetime) -> Tuple[datetime, int]:
+        """Retourne (date_effet_estimee, risk_latency_days)."""
+        cutoff = signal_dt.replace(hour=LINXEA_CUTOFF_HOUR, minute=LINXEA_CUTOFF_MINUTE,
+                                     second=0, microsecond=0)
+        d = signal_dt.date()
+        latency = 1 if signal_dt <= cutoff else 2  # avant cutoff = J+1, après = J+2
+        # Ajustement week-end simplifié
+        target = signal_dt + timedelta(days=latency)
+        while target.weekday() >= 5:  # samedi=5, dimanche=6
+            target += timedelta(days=1)
+            latency += 1
+        return target, latency
+
+    def latency_risk(self, ticker: str, current_score: int, latency_days: int) -> Dict:
+        """Perte moyenne historique observée sur une fenêtre = latency_days,
+        conditionnée aux situations similaires (réutilise EmpiricalAnalogEngine)."""
+        res = self.analog.analyze(ticker, current_score, horizon=max(latency_days, 1), tolerance=1)
+        if not res.get("available"):
+            return {"available": False}
+        return {
+            "available": True,
+            "expected_loss_pct": res["expected_alpha"] * 100,
+            "n_samples": res["n_samples"],
+            "risk_label": "LOW" if res["expected_alpha"] > -0.005 else
+                          "MODERATE" if res["expected_alpha"] > -0.02 else "HIGH",
+        }
+
+# =============================================================================
+# MODULE 23 : DATA QUALITY & DECISION ENGINE
+# =============================================================================
+class DataQualityEngine:
+    def score(self, ind: Optional[Dict], world_regime: Dict) -> Dict:
+        if ind is None:
+            return {"score": 0, "label": "NO_DECISION", "reasons": ["Aucune donnée"]}
+        s, reasons = 100, []
+        if ind["n_history"] < 250:
+            s -= 30; reasons.append(f"Historique court ({ind['n_history']}j)")
+        if ind["sma200"] is None:
+            s -= 20; reasons.append("SMA200 indisponible")
+        if ind["alpha20"] is None or ind["alpha60"] is None:
+            s -= 25; reasons.append("Alpha indisponible")
+        if not world_regime.get("world_ticker") and not world_regime.get("regime"):
+            s -= 25; reasons.append("Benchmark World indisponible")
+        label = "EXCELLENT" if s >= 90 else "BON" if s >= 80 else "ACCEPTABLE" if s >= 60 else "NO_DECISION"
+        return {"score": max(0, s), "label": label, "reasons": reasons}
+
+
+class DecisionEngine:
+    """Combine tous les moteurs. Applique les vetos de sécurité et l'hystérésis."""
+    DECISIONS = ["EXIT", "REDUCE_50", "REDUCE_25", "WATCH", "HOLD", "RE_ENTER"]
+
+    def decide(self, ticker: str, ind: Dict, crash: Dict, underperf: Dict,
+               world_regime: Dict, dq: Dict, latency: Dict,
+               risk_contribution_pct: Optional[float] = None,
+               previous_decision: Optional[str] = None) -> Dict:
+
+        # --- VETO 1 : qualité de données ---
+        if dq["label"] == "NO_DECISION":
+            return {"decision": "NO_DECISION", "confidence": "NONE",
+                    "reason": "Données insuffisantes : " + "; ".join(dq["reasons"])}
+
+        # --- VETO 2 : World en CRASH ---
+        if world_regime.get("regime") == "CRASH" and crash["score"] >= 4:
+            return {"decision": "REDUCE_50", "confidence": "HIGH",
+                    "reason": f"World en CRASH + Crash Score {crash['score']}/7"}
+
+        # --- Hystérésis : seuils différents sortie / réentrée ---
+        was_reduced_or_exit = previous_decision in ("REDUCE_25", "REDUCE_50", "EXIT")
+
+        combined_risk = crash["score"] + underperf["score"]  # sur 11 max
+
+        if crash["level"] == "CRITICAL" and world_regime.get("regime") in ("RISK_OFF", "CRASH"):
+            decision, conf = "EXIT", "HIGH"
+        elif crash["score"] >= DECISION_EXIT_SCORE:
+            decision, conf = "REDUCE_50", "HIGH"
+        elif crash["score"] >= 4 or underperf["score"] >= 3:
+            decision, conf = "REDUCE_25", "MEDIUM"
+        elif was_reduced_or_exit and combined_risk <= DECISION_REENTER_SCORE and ind["trend_score"] >= 3:
+            decision, conf = "RE_ENTER", "MEDIUM"
+        elif crash["score"] >= 2 or underperf["score"] >= 2:
+            decision, conf = "WATCH", "MEDIUM"
+        else:
+            decision, conf = "HOLD", "HIGH" if dq["score"] >= 90 else "MEDIUM"
+
+        # --- VETO 3 : risque de concentration portefeuille ---
+        note_risk = None
+        if risk_contribution_pct is not None and risk_contribution_pct > 40 and decision == "HOLD":
+            decision, conf = "WATCH", "MEDIUM"
+            note_risk = f"Contribution au risque portefeuille = {risk_contribution_pct:.0f}% (> 40%)"
+
+        return {
+            "decision": decision, "confidence": conf,
+            "crash_score": crash["score"], "crash_level": crash["level"],
+            "underperf_score": underperf["score"],
+            "world_regime": world_regime.get("regime"),
+            "data_quality": dq["label"],
+            "latency_risk": latency.get("risk_label") if latency.get("available") else "N/A",
+            "note_risk": note_risk,
+            "reasons": crash["reasons"] + underperf["reasons"],
+        }
+
+# =============================================================================
+# MODULE 24 : FEATURE ENGINEERING (vectorisé, pour ML + Backtest + Calibration)
+# =============================================================================
+def compute_world_regime_series(dm: DataManager) -> pd.Series:
+    """Version vectorisée de WorldRegimeEngine, sur toute la série historique.
+    Retourne une Series numérique : CRASH=-2, RISK_OFF=-1, NEUTRAL=0, RISK_ON=1."""
+    world_tk = None
+    for wt in [BENCHMARK_WORLD_TICKER] + WORLD_TICKERS:
+        df = dm.data.get(wt)
+        if df is not None and not df.empty:
+            world_tk = wt
+            break
+    if world_tk is None:
+        return pd.Series(dtype=float)
+
+    close = dm.data[world_tk]["Close"].dropna()
+    ret = close.pct_change()
+    sma20 = close.rolling(20).mean()
+    sma50 = close.rolling(50).mean()
+    sma200 = close.rolling(200).mean()
+    vol20 = ret.rolling(20).std() * np.sqrt(252)
+    vol120 = ret.rolling(120).std() * np.sqrt(252)
+    vol_shock = vol20 / vol120
+    dd = close / close.cummax() - 1
+
+    above20 = close > sma20
+    above50 = close > sma50
+    above200 = close > sma200
+    sma50_above200 = sma50 > sma200
+
+    regime = pd.Series(0, index=close.index)  # NEUTRAL par défaut
+    risk_on = above200 & sma50_above200 & above20 & (vol_shock < 1.2)
+    risk_off = ((~above50) & (sma20 < sma50)) | (vol_shock > 1.3)
+    crash = (~above200) & (dd < -0.10) & (vol_shock > 1.4)
+
+    regime[risk_on] = 1
+    regime[risk_off] = -1
+    regime[crash] = -2  # priorité maximale : écrase les autres
+    return regime
+
+
+def build_feature_frame(dm: DataManager, ticker: str) -> pd.DataFrame:
+    """Construit une DataFrame de features + targets (forward alpha) pour un ticker,
+    alignée sur le benchmark World. Une ligne = un jour de l'historique."""
+    df = dm.data.get(ticker)
     world = get_world_series(dm, exclude_ticker=ticker)
-    if world.empty:
-        return None
-    sat_df = dm.data.get(ticker, pd.DataFrame())
-    if sat_df is None or sat_df.empty:
-        return None
-    wc = world
-    sc = sat_df["Close"].dropna()
-    common = sc.index.intersection(wc.index)
-    if len(common) < 20:
-        return None
-    cutoff = max(DATE_DEBUT.date(), (datetime.now() - timedelta(days=120)).date())
-    common_f = [d for d in common if d.date() >= cutoff] or list(common[-90:])
-    ratio = sc[common_f] / wc[common_f]
-    rel = (ratio / ratio.iloc[0] - 1) * 100
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=rel.index, y=rel.values.clip(min=0), fill="tozeroy",
-                             fillcolor="rgba(212,175,55,.12)", line=dict(color="rgba(0,0,0,0)"), showlegend=False))
-    fig.add_trace(go.Scatter(x=rel.index, y=rel.values.clip(max=0), fill="tozeroy",
-                             fillcolor="rgba(255,49,49,.12)", line=dict(color="rgba(0,0,0,0)"), showlegend=False))
-    fig.add_trace(go.Scatter(x=rel.index, y=rel.values, line=dict(color="#D4AF37", width=2), name=f"{nom}/World"))
-    if len(rel) >= 14:
-        last14 = rel.iloc[-14:]
-        fig.add_vrect(x0=last14.index[0], x1=last14.index[-1], fillcolor="rgba(0,123,255,.06)", layer="below", line_width=0)
-    fig.add_hline(y=0, line_dash="dot", line_color="#6B7585", opacity=.7)
-    fig.update_layout(
-        **_PLOTLY_BASE,
-        title=dict(text=f"Performance relative : {nom} vs World (base 100)", font=dict(size=11, color="#6B7585")),
-        margin=dict(t=20, b=20, l=50, r=20), height=200,
-        showlegend=False, xaxis=dict(gridcolor="#2E3340"), yaxis=dict(gridcolor="#2E3340", ticksuffix="%")
-    )
-    return fig
+    if df is None or df.empty or world.empty:
+        return pd.DataFrame()
+
+    close = df["Close"].dropna()
+    common = close.index.intersection(world.index)
+    if len(common) < 300:
+        return pd.DataFrame()
+
+    close = close.loc[common]
+    world_c = world.loc[common]
+    ret = close.pct_change()
+    world_ret = world_c.pct_change()
+
+    feat = pd.DataFrame(index=common)
+    feat["ret1"] = ret
+    feat["ret5"] = close / close.shift(5) - 1
+    feat["ret20"] = close / close.shift(20) - 1
+    feat["ret60"] = close / close.shift(60) - 1
+
+    world_ret5 = world_c / world_c.shift(5) - 1
+    world_ret20 = world_c / world_c.shift(20) - 1
+    world_ret60 = world_c / world_c.shift(60) - 1
+    feat["alpha5"] = feat["ret5"] - world_ret5
+    feat["alpha20"] = feat["ret20"] - world_ret20
+    feat["alpha60"] = feat["ret60"] - world_ret60
+
+    rs = close / world_c
+    rs_ma20 = rs.rolling(20).mean()
+    rs_ma50 = rs.rolling(50).mean()
+    feat["rs_gap"] = rs - rs_ma20
+    feat["rs_slope"] = rs_ma20 - rs_ma20.shift(10)
+    feat["rs_trend"] = rs_ma20 - rs_ma50
+
+    sma20 = close.rolling(20).mean()
+    sma50 = close.rolling(50).mean()
+    sma200 = close.rolling(200).mean()
+    feat["dist_sma20"] = close / sma20 - 1
+    feat["dist_sma50"] = close / sma50 - 1
+    feat["dist_sma200"] = close / sma200 - 1
+
+    vol20 = ret.rolling(20).std() * np.sqrt(252)
+    vol60 = ret.rolling(60).std() * np.sqrt(252)
+    vol120 = ret.rolling(120).std() * np.sqrt(252)
+    feat["vol20"] = vol20
+    feat["vol_ratio"] = vol20 / vol60
+    feat["vol_shock"] = vol20 / vol120
+
+    dd = close / close.cummax() - 1
+    feat["drawdown"] = dd
+    feat["dd_5d"] = close / close.shift(5) - 1
+
+    feat["mom5"] = feat["ret5"]
+    feat["mom20"] = feat["ret20"]
+    feat["mom_accel"] = feat["ret20"] - feat["ret20"].shift(5)
+
+    regime_series = compute_world_regime_series(dm)
+    feat["world_regime"] = regime_series.reindex(common).ffill().fillna(0)
+
+    # --- Targets (forward alpha) ---
+    for h in (3, 10, 20, 60):
+        etf_fwd = close.shift(-h) / close - 1
+        world_fwd = world_c.shift(-h) / world_c - 1
+        feat[f"fwd_alpha_{h}"] = etf_fwd - world_fwd
+
+    return feat.dropna(subset=["alpha20", "vol_ratio"])  # garde les lignes exploitables
+
+# =============================================================================
+# MODULE 25 : FORWARD ALPHA MODEL (Ridge + Walk-Forward, avec fallback baseline)
+# =============================================================================
+FEATURE_COLS = ["ret5", "ret20", "ret60", "alpha5", "alpha20", "alpha60",
+                 "rs_gap", "rs_slope", "rs_trend", "dist_sma20", "dist_sma50",
+                 "dist_sma200", "vol20", "vol_ratio", "vol_shock", "drawdown",
+                 "dd_5d", "mom5", "mom20", "mom_accel", "world_regime"]
+
+class ForwardAlphaModel:
+    """
+    Prédit fwd_alpha_H (H=20 par défaut). Toujours évalué en walk-forward
+    (jamais entraîné et testé sur la même période — voir point 32 de la spec).
+    Compare systématiquement Ridge vs baseline (moyenne historique constante).
+    """
+    def __init__(self, horizon: int = 20, n_folds: int = 4, ridge_alpha: float = 5.0):
+        self.horizon = horizon
+        self.n_folds = n_folds
+        self.ridge_alpha = ridge_alpha
+
+    def _splits(self, n: int) -> List[Tuple[slice, slice]]:
+        """Découpage expanding window : train grandit, test = tranche suivante."""
+        fold_size = n // (self.n_folds + 1)
+        if fold_size < 30:
+            return []
+        splits = []
+        for i in range(1, self.n_folds + 1):
+            train_end = fold_size * i
+            test_end = min(fold_size * (i + 1), n)
+            if test_end <= train_end:
+                continue
+            splits.append((slice(0, train_end), slice(train_end, test_end)))
+        return splits
+
+    def walk_forward_evaluate(self, feat: pd.DataFrame) -> Dict:
+        target_col = f"fwd_alpha_{self.horizon}"
+        data = feat.dropna(subset=FEATURE_COLS + [target_col])
+        if len(data) < 200:
+            return {"available": False, "reason": "Historique insuffisant pour walk-forward"}
+
+        X = data[FEATURE_COLS].values
+        y = data[target_col].values
+        splits = self._splits(len(data))
+        if not splits:
+            return {"available": False, "reason": "Pas assez de données pour découper en folds"}
+
+        ridge_preds, baseline_preds, actuals = [], [], []
+
+        for train_idx, test_idx in splits:
+            X_train, y_train = X[train_idx], y[train_idx]
+            X_test, y_test = X[test_idx], y[test_idx]
+            if len(y_train) < 50:
+                continue
+
+            baseline_pred = np.full(len(y_test), y_train.mean())
+            baseline_preds.extend(baseline_pred)
+
+            if SKLEARN_OK:
+                scaler = StandardScaler()
+                X_train_s = scaler.fit_transform(X_train)
+                X_test_s = scaler.transform(X_test)
+                model = Ridge(alpha=self.ridge_alpha)
+                model.fit(X_train_s, y_train)
+                ridge_pred = model.predict(X_test_s)
+            else:
+                ridge_pred = baseline_pred  # dégradation propre si sklearn absent
+            ridge_preds.extend(ridge_pred)
+            actuals.extend(y_test)
+
+        if len(actuals) < 30:
+            return {"available": False, "reason": "Échantillon OOS trop petit"}
+
+        actuals = np.array(actuals); ridge_preds = np.array(ridge_preds); baseline_preds = np.array(baseline_preds)
+
+        def _metrics(preds):
+            hit_rate = float((np.sign(preds) == np.sign(actuals)).mean())
+            corr = float(np.corrcoef(preds, actuals)[0, 1]) if np.std(preds) > 1e-9 else 0.0
+            mae = float(np.mean(np.abs(preds - actuals)))
+            return {"hit_rate": hit_rate, "correlation": corr, "mae": mae}
+
+        ridge_metrics = _metrics(ridge_preds)
+        baseline_metrics = _metrics(baseline_preds)
+
+        return {
+            "available": True, "n_oos_samples": len(actuals),
+            "ridge": ridge_metrics, "baseline": baseline_metrics,
+            "ridge_better": ridge_metrics["correlation"] > baseline_metrics["correlation"],
+        }
+
+    def fit_production_model(self, feat: pd.DataFrame):
+        """Modèle final entraîné sur TOUT l'historique dispo, pour prédire AUJOURD'HUI.
+        Ne jamais utiliser ce modèle pour évaluer une performance (c'est du in-sample)."""
+        target_col = f"fwd_alpha_{self.horizon}"
+        data = feat.dropna(subset=FEATURE_COLS + [target_col])
+        if len(data) < 100 or not SKLEARN_OK:
+            return None, None
+        X = data[FEATURE_COLS].values
+        y = data[target_col].values
+        scaler = StandardScaler()
+        X_s = scaler.fit_transform(X)
+        model = Ridge(alpha=self.ridge_alpha)
+        model.fit(X_s, y)
+        return model, scaler
+
+    def predict_today(self, feat: pd.DataFrame, model, scaler) -> Optional[float]:
+        if model is None or scaler is None or feat.empty:
+            return None
+        last_row = feat[FEATURE_COLS].iloc[[-1]].dropna()
+        if last_row.empty:
+            return None
+        X_s = scaler.transform(last_row.values)
+        return float(model.predict(X_s)[0])
+
+# =============================================================================
+# MODULE 26 : BACKTEST ENGINE (Stratégies A/B/C/D)
+# =============================================================================
+WEIGHT_MAP = {"HOLD": 1.0, "RE_ENTER": 1.0, "WATCH": 1.0,
+              "REDUCE_25": 0.75, "REDUCE_50": 0.50, "EXIT": 0.0, "NO_DECISION": None}
+
+class BacktestEngine:
+    """
+    Simule 4 stratégies sur l'historique d'un ETF :
+      A - Buy & Hold
+      B - Signal appliqué sans délai
+      C - Signal + délai Linxea (J+1 avant cutoff, J+2 sinon — simplifié en jours de bourse)
+      D - Signal + scénario stress (+1 séance de délai supplémentaire)
+    """
+    def __init__(self, crash_thresholds: Dict, underperf_thresholds: Dict,
+                 exit_score: int = DECISION_EXIT_SCORE, reenter_score: int = DECISION_REENTER_SCORE):
+        self.ct = crash_thresholds
+        self.ut = underperf_thresholds
+        self.exit_score = exit_score
+        self.reenter_score = reenter_score
+
+    def compute_decision_series(self, feat: pd.DataFrame) -> pd.Series:
+        """Reconstruit crash_score + underperf_score jour par jour (vectorisé),
+        puis applique l'hystérésis (boucle nécessaire ici, état séquentiel)."""
+        close_proxy = None  # on travaille uniquement sur les features déjà calculées
+        crash_score = pd.Series(0, index=feat.index)
+        crash_score += (feat["dist_sma20"] < 0).astype(int)
+        crash_score += ((feat["dist_sma20"] < 0) & (feat["rs_trend"] < 0)).astype(int)  # proxy SMA20<SMA50
+        crash_score += (feat["alpha20"] < 0).astype(int)
+        crash_score += (feat["alpha60"] < 0).astype(int)
+        crash_score += (feat["vol_ratio"] > self.ct["vol_ratio"]).astype(int)
+        crash_score += (feat["dd_5d"] < self.ct["dd_5d"]).astype(int)
+        crash_score += (feat["world_regime"] <= -1).astype(int)  # RISK_OFF ou CRASH
+
+        underperf_score = pd.Series(0, index=feat.index)
+        underperf_score += (feat["alpha20"] < self.ut["alpha20"]).astype(int)
+        underperf_score += (feat["alpha60"] < self.ut["alpha60"]).astype(int)
+
+        combined = crash_score + underperf_score
+
+        decisions = []
+        was_reduced = False
+        for i in range(len(feat)):
+            cs = crash_score.iloc[i]
+            comb = combined.iloc[i]
+            wr = feat["world_regime"].iloc[i]
+            trend_ok = feat["dist_sma20"].iloc[i] > 0
+
+            if wr <= -2 and cs >= 4:
+                d = "REDUCE_50"
+            elif cs >= self.exit_score:
+                d = "REDUCE_50"
+            elif cs >= 4 or underperf_score.iloc[i] >= 3:
+                d = "REDUCE_25"
+            elif was_reduced and comb <= self.reenter_score and trend_ok:
+                d = "HOLD"
+            elif cs >= 2 or underperf_score.iloc[i] >= 2:
+                d = "WATCH"
+            else:
+                d = "HOLD"
+            was_reduced = d in ("REDUCE_25", "REDUCE_50")
+            decisions.append(d)
+
+        return pd.Series(decisions, index=feat.index)
+
+    def run(self, dm: DataManager, ticker: str, feat: pd.DataFrame,
+            latency_days_normal: int = 1, latency_days_stress: int = 2) -> Dict:
+        df = dm.data.get(ticker)
+        world = get_world_series(dm, exclude_ticker=ticker)
+        close = df["Close"].loc[feat.index]
+        world_c = world.loc[feat.index]
+        etf_ret = close.pct_change().fillna(0)
+        world_ret = world_c.pct_change().fillna(0)
+
+        decisions = self.compute_decision_series(feat)
+        weights = decisions.map(WEIGHT_MAP).fillna(1.0)
+
+        strategies = {}
+
+        # Stratégie A : Buy & Hold
+        strategies["A_BuyHold"] = etf_ret.copy()
+
+        # Stratégie B : signal sans délai (poids appliqué au rendement du jour même)
+        strategies["B_SignalNoDelay"] = etf_ret * weights
+
+        # Stratégie C : signal + délai Linxea (le poids d'hier s'applique au rendement d'aujourd'hui)
+        weights_delayed_c = weights.shift(latency_days_normal).fillna(1.0)
+        strategies["C_SignalLinxeaDelay"] = etf_ret * weights_delayed_c
+
+        # Stratégie D : signal + scénario stress (délai supplémentaire)
+        weights_delayed_d = weights.shift(latency_days_stress).fillna(1.0)
+        strategies["D_SignalStress"] = etf_ret * weights_delayed_d
+
+        results = {}
+        for name, strat_ret in strategies.items():
+            results[name] = self._compute_metrics(strat_ret, world_ret, weights if "Signal" in name else None)
+        results["_decisions"] = decisions
+        results["_weights"] = weights
+        return results
+
+    def _compute_metrics(self, strat_ret: pd.Series, world_ret: pd.Series,
+                          weights: Optional[pd.Series]) -> Dict:
+        n = len(strat_ret)
+        if n < 30:
+            return {"available": False}
+        equity = (1 + strat_ret).cumprod()
+        total_return = float(equity.iloc[-1] - 1)
+        years = n / 252
+        cagr = float((equity.iloc[-1]) ** (1 / years) - 1) if years > 0 and equity.iloc[-1] > 0 else np.nan
+        ann_vol = float(strat_ret.std() * np.sqrt(252))
+        rmax = equity.cummax()
+        dd = equity / rmax - 1
+        max_dd = float(dd.min())
+        sharpe = float((cagr - 0.025) / ann_vol) if ann_vol > 0 else np.nan
+        calmar = float(cagr / abs(max_dd)) if max_dd != 0 else np.nan
+
+        world_equity = (1 + world_ret).cumprod()
+        world_total = float(world_equity.iloc[-1] - 1)
+        alpha_vs_world = total_return - world_total
+
+        worst_day = float(strat_ret.min())
+        worst_5d = float(strat_ret.rolling(5).sum().min())
+        worst_10d = float(strat_ret.rolling(10).sum().min())
+
+        n_trades = int((weights.diff().abs() > 0.01).sum()) if weights is not None else 0
+        turnover = float(weights.diff().abs().sum()) if weights is not None else 0.0
+
+        return {
+            "available": True, "total_return_pct": total_return * 100, "cagr_pct": cagr * 100,
+            "vol_pct": ann_vol * 100, "max_drawdown_pct": max_dd * 100,
+            "sharpe": sharpe, "calmar": calmar, "alpha_vs_world_pct": alpha_vs_world * 100,
+            "worst_day_pct": worst_day * 100, "worst_5d_pct": worst_5d * 100, "worst_10d_pct": worst_10d * 100,
+            "n_trades": n_trades, "turnover": round(turnover, 2), "equity_curve": equity,
+        }
+
+# =============================================================================
+# MODULE 27 : THRESHOLD CALIBRATION (grid search hors-échantillon)
+# =============================================================================
+class CalibrationEngine:
+    """
+    Teste plusieurs combinaisons de seuils sur la partie 'train' (70% des données),
+    sélectionne celle qui maximise le Calmar (CAGR/MaxDD) SOUS CONTRAINTE que le
+    CAGR ne soit pas détruit (garde-fou), puis valide le résultat sur les 30%
+    restants (données jamais vues pendant la recherche) — cf. point 62 de la spec.
+    """
+    ALPHA20_GRID = [-0.01, -0.02, -0.03, -0.04, -0.05]
+    VOL_RATIO_GRID = [1.1, 1.2, 1.3, 1.4, 1.5]
+    DD5D_GRID = [-0.03, -0.05, -0.07, -0.10]
+
+    def __init__(self, dm: DataManager):
+        self.dm = dm
+
+    def calibrate(self, ticker: str, feat: pd.DataFrame, train_frac: float = 0.7) -> Dict:
+        n = len(feat)
+        if n < 300:
+            return {"available": False, "reason": "Historique insuffisant pour calibration"}
+
+        split = int(n * train_frac)
+        feat_train = feat.iloc[:split]
+        feat_test = feat.iloc[split:]
+
+        buyhold_cagr_train = self._buyhold_cagr(ticker, feat_train)
+
+        best = None
+        results_grid = []
+        for a20 in self.ALPHA20_GRID:
+            for vr in self.VOL_RATIO_GRID:
+                for dd in self.DD5D_GRID:
+                    ct = {"vol_ratio": vr, "dd_5d": dd}
+                    ut = {"alpha20": a20, "alpha60": a20 * 0.7}
+                    bt = BacktestEngine(ct, ut)
+                    res = bt.run(self.dm, ticker, feat_train)
+                    metric = res.get("C_SignalLinxeaDelay", {})
+                    if not metric.get("available"):
+                        continue
+                    # Garde-fou : ne pas accepter un jeu de seuils qui détruit le CAGR
+                    if buyhold_cagr_train and metric["cagr_pct"] < 0.4 * buyhold_cagr_train:
+                        continue
+                    calmar = metric.get("calmar", np.nan)
+                    if np.isnan(calmar):
+                        continue
+                    entry = {"alpha20": a20, "vol_ratio": vr, "dd_5d": dd, "calmar": calmar,
+                             "cagr_pct": metric["cagr_pct"], "max_dd_pct": metric["max_drawdown_pct"]}
+                    results_grid.append(entry)
+                    if best is None or calmar > best["calmar"]:
+                        best = entry
+
+        if best is None:
+            return {"available": False, "reason": "Aucune combinaison n'a passé le garde-fou CAGR"}
+
+        # Validation hors-échantillon avec les seuils retenus
+        ct_best = {"vol_ratio": best["vol_ratio"], "dd_5d": best["dd_5d"]}
+        ut_best = {"alpha20": best["alpha20"], "alpha60": best["alpha20"] * 0.7}
+        bt_best = BacktestEngine(ct_best, ut_best)
+        oos_res = bt_best.run(self.dm, ticker, feat_test)
+        oos_metric = oos_res.get("C_SignalLinxeaDelay", {})
+
+        default_bt = BacktestEngine(CRASH_THRESHOLDS, UNDERPERF_THRESHOLDS)
+        default_oos = default_bt.run(self.dm, ticker, feat_test).get("C_SignalLinxeaDelay", {})
+
+        return {
+            "available": True, "n_combinations_tested": len(results_grid),
+            "best_thresholds": best,
+            "oos_validation": oos_metric,
+            "default_thresholds_oos": default_oos,  # comparaison avec vos seuils actuels
+            "improvement": (oos_metric.get("calmar", 0) - default_oos.get("calmar", 0))
+                            if oos_metric.get("available") and default_oos.get("available") else None,
+        }
+
+    def _buyhold_cagr(self, ticker: str, feat: pd.DataFrame) -> Optional[float]:
+        df = self.dm.data.get(ticker)
+        if df is None:
+            return None
+        close = df["Close"].loc[feat.index]
+        n = len(close)
+        if n < 30:
+            return None
+        years = n / 252
+        total = close.iloc[-1] / close.iloc[0]
+        return float((total ** (1/years) - 1) * 100) if total > 0 else None
 
 # -----------------------------------------------------------------------------
-# MODULE 16 : STREAMLIT UI (avec diagnostic screener)
+# MODULE 16 : STREAMLIT UI (avec intégration v2, backtest, calibration)
 # -----------------------------------------------------------------------------
 class StreamlitUI:
     def __init__(self, dm: DataManager, pm: PersistenceManager,
@@ -2629,6 +3239,15 @@ class StreamlitUI:
         self.te = te if te is not None else TransactionEngine()
         self.analytics = AnalyticsEngine(dm)
         self.signal = SignalEngine(dm, self.analytics)
+        # Nouveaux moteurs (créés une fois)
+        self.ie = IndicatorEngine(dm)
+        self.wre = WorldRegimeEngine(dm, self.ie)
+        self.cpe = CrashProtectionEngine()
+        self.upe = UnderperformanceEngine()
+        self.analog = EmpiricalAnalogEngine(dm, self.ie)
+        self.lee = LinxeaExecutionEngine(dm, self.analog)
+        self.dqe = DataQualityEngine()
+        self.dec_engine = DecisionEngine()
 
     @staticmethod
     def _sign(v: float) -> str:
@@ -3319,68 +3938,221 @@ class StreamlitUI:
                     st.metric(lbl, "N/A")
             st.markdown('</div>', unsafe_allow_html=True)
 
-    def render_quant_alert(self, ptf: Dict):
-        st.markdown("## 📊 ALERTE QUANTITATIVE (avant 16h30)")
-        st.caption("Détection des probabilités de baisse sur J+1, J+2, J+3. Calcul de l'espérance de gain (EV) et du pourcentage de sortie conseillé.")
+    # ========================================================================
+    # NOUVELLE méthode render_quant_alert_v2 (remplace l'ancienne appel)
+    # ========================================================================
+    def render_quant_alert_v2(self, ptf: Dict, positions_conf: List[Dict]):
+        st.markdown("## 🧭 Alerte Quantitative — Decision Engine v2")
+        st.caption("Combine Trend, Relative Strength, Crash Protection, Underperformance, "
+                   "Régime World et latence Linxea. Aucun signal isolé ne déclenche une décision seul.")
 
+        world_regime = self.wre.get_regime()
         now = datetime.now(ZoneInfo("Europe/Paris"))
-        cutoff = now.replace(hour=16, minute=30, second=0, microsecond=0)
-        is_before_cutoff = now < cutoff
 
-        if not is_before_cutoff:
-            st.warning("⏰ Il est après 16h30. Les alertes sont fournies à titre indicatif, mais l'ordre ne pourra être exécuté qu'à J+1.")
+        regime_colors = {"RISK_ON": "#22C55E", "NEUTRAL": "#3B82F6", "RISK_OFF": "#F97316", "CRASH": "#FF3131"}
+        rc = regime_colors.get(world_regime["regime"], "#6B7585")
+        st.markdown(f'<div class="regime-banner" style="background:{rc}22;border:1px solid {rc};">'
+                    f'🌍 World Regime : <b style="color:{rc};">{world_regime["regime"]}</b> · '
+                    f'Vol Shock : {world_regime.get("vol_shock","N/A")} · '
+                    f'Drawdown : {world_regime.get("drawdown","N/A")}%</div>', unsafe_allow_html=True)
 
-        alerts_data = []
+        if "_last_decisions" not in st.session_state:
+            st.session_state["_last_decisions"] = {}
+
         for pos in ptf["positions"]:
             ticker = pos.get("ticker")
             if not ticker or pos["valeur"] <= 0:
                 continue
-            prix = pos["prix"]
-            if prix is None:
-                continue
-            alert = self.qae.compute_alert(ticker, prix, pos["valeur"])
-            if alert:
-                alerts_data.append(alert)
 
-        if not alerts_data:
-            st.info("Aucune alerte générée. Données insuffisantes.")
+            ind = self.ie.compute(ticker)
+            crash = self.cpe.compute(ind, world_regime["regime"]) if ind else {"score": 0, "level": "N/A", "reasons": []}
+            underperf = self.upe.compute(ind) if ind else {"score": 0, "max_score": 4, "reasons": []}
+            dq = self.dqe.score(ind, world_regime)
+
+            exec_date, latency_days = self.lee.compute_execution_date(now)
+            latency = self.lee.latency_risk(ticker, crash["score"], latency_days) if ind else {"available": False}
+
+            rc_pct = None  # à brancher avec qre.risk_contribution si déjà calculé
+
+            prev_decision = st.session_state["_last_decisions"].get(ticker)
+            result = self.dec_engine.decide(ticker, ind or {}, crash, underperf, world_regime, dq,
+                                            latency, risk_contribution_pct=rc_pct,
+                                            previous_decision=prev_decision)
+            st.session_state["_last_decisions"][ticker] = result["decision"]
+
+            nom = ETF_LIBRARY.get(ticker, {}).get("nom", ticker)
+            decision_colors = {"HOLD": "#22C55E", "WATCH": "#F97316", "REDUCE_25": "#F97316",
+                               "REDUCE_50": "#FF3131", "EXIT": "#FF3131", "RE_ENTER": "#3B82F6",
+                               "NO_DECISION": "#6B7585"}
+            dcol = decision_colors.get(result["decision"], "#6B7585")
+
+            with st.container():
+                st.markdown(f'<div class="card" style="border-left:4px solid {dcol};">', unsafe_allow_html=True)
+                c1, c2, c3 = st.columns([2, 3, 2])
+                with c1:
+                    st.markdown(f"**{nom}**")
+                    st.markdown(f'<span style="color:{dcol};font-weight:800;font-size:1.3rem;">'
+                                f'{result["decision"]}</span>', unsafe_allow_html=True)
+                    st.caption(f"Confiance : {result['confidence']}")
+                with c2:
+                    if ind:
+                        st.write(f"Trend {ind['trend_score']}/4 · Force relative {ind['relative_trend_score']}/4")
+                        st.write(f"Alpha20 : {ind['alpha20']*100:+.1f}%" if ind['alpha20'] is not None else "Alpha20 : N/A")
+                        st.write(f"Crash Score : {crash['score']}/7 ({crash['level']}) · "
+                                 f"Underperf : {underperf['score']}/4")
+                    else:
+                        st.warning("Indicateurs indisponibles")
+                with c3:
+                    st.write(f"Qualité données : {dq['label']} ({dq['score']}/100)")
+                    st.write(f"Exécution estimée : {exec_date.strftime('%d/%m %H:%M')} (J+{latency_days})")
+                    if latency.get("available"):
+                        st.write(f"Risque latence : {latency['risk_label']} "
+                                 f"({latency['expected_loss_pct']:+.2f}%, n={latency['n_samples']})")
+
+                if result.get("note_risk"):
+                    st.info(result["note_risk"])
+                if result["reasons"]:
+                    with st.expander("Détail des signaux"):
+                        for r in result["reasons"]:
+                            st.write(f"• {r}")
+                st.markdown('</div>', unsafe_allow_html=True)
+
+    # ========================================================================
+    # NOUVEAU : Onglet Backtest & Calibration
+    # ========================================================================
+    def render_backtest_calibration_tab(self, ptf: Dict):
+        st.markdown("## 🧪 Backtest & Calibration (Priorité 3)")
+        st.caption("Walk-forward, comparaison de stratégies, calibration des seuils "
+                   "hors-échantillon. Aucun résultat ici ne doit être pris comme une "
+                   "garantie — c'est un outil d'aide à la décision statistique.")
+
+        if not SKLEARN_OK:
+            st.warning("⚠ scikit-learn n'est pas installé — le modèle Ridge est désactivé, "
+                       "seule la baseline historique est disponible. "
+                       "`pip install scikit-learn --break-system-packages`")
+
+        held_tickers = [p.get("ticker") for p in ptf["positions"] if p.get("ticker") and p["valeur"] > 0]
+        if not held_tickers:
+            st.info("Aucune position détenue à analyser.")
+            return
+        ticker = st.selectbox("ETF à analyser", held_tickers,
+                              format_func=lambda t: ETF_LIBRARY.get(t, {}).get("nom", t))
+
+        with st.spinner("Construction des features et calculs..."):
+            feat = build_feature_frame(self.dm, ticker)
+
+        if feat.empty:
+            st.error("Historique insuffisant pour cet ETF (minimum ~300 jours communs avec le World).")
             return
 
-        for alert in alerts_data:
-            col1, col2, col3 = st.columns([2, 2, 1])
-            ticker = alert["ticker"]
-            nom = ETF_LIBRARY.get(ticker, {}).get("nom", ticker)
-            with col1:
-                st.markdown(f"**{nom}** (`{ticker}`)")
-                st.metric("Prix actuel", f"{alert['price']:.2f}€")
-            with col2:
-                p1 = alert["prob_j1"] * 100
-                p2 = alert["prob_j2"] * 100
-                p3 = alert["prob_j3"] * 100
-                st.markdown(f"**Probabilités de baisse**")
-                st.write(f"J+1 : {p1:.1f}%  |  J+2 : {p2:.1f}%  |  J+3 : {p3:.1f}%")
-                ev = alert["ev"] * 100
-                st.metric("Espérance de gain (EV)", f"{ev:.2f}%")
-            with col3:
-                sell_pct = alert["sell_pct"] * 100
-                sell_amount = alert["sell_amount"]
-                color = "#22C55E" if sell_pct == 0 else "#FF3131" if sell_pct >= 50 else "#F97316"
-                st.markdown(f"**Vente suggérée**")
-                st.markdown(f'<span style="color:{color};font-weight:bold;">{sell_pct:.0f}%</span>', unsafe_allow_html=True)
-                st.write(f"Montant : {sell_amount:,.0f}€")
+        st.markdown(f"📊 **{len(feat)}** jours de données exploitables pour `{ticker}`")
 
-            with st.expander("🔍 Détails des indicateurs et paliers"):
-                ind = alert["indicators"]
-                st.write(f"RSI : {ind.get('rsi', 0):.1f}")
-                st.write(f"MACD : {ind.get('macd', 0):.3f}")
-                st.write(f"Distance SMA20 : {ind.get('dist_sma20', 0):.1f}%")
-                st.write(f"Distance SMA50 : {ind.get('dist_sma50', 0):.1f}%")
-                st.write(f"Momentum 5j : {ind.get('mom5', 0):.1f}%")
-                st.write(f"Volatilité relative : {ind.get('vol_ratio', 1):.2f}")
-                st.write(f"VIX ratio : {ind.get('vix_ratio', 1):.2f}")
-                st.write(f"Coût d'arbitrage : {alert['cost_bps']:.1f} bps")
-                st.write("Paliers d'exposition : 0%, 25%, 50%, 75%")
-                st.caption("Rappel : un régime de risque élevé sans persistance+probabilité confirmées n'est PAS un signal de vente.")
+        # --- Section 1 : Walk-Forward Ridge vs Baseline ---
+        st.markdown("### 1️⃣ Walk-Forward : Ridge vs Baseline historique")
+        model = ForwardAlphaModel(horizon=20, n_folds=4)
+        wf_result = model.walk_forward_evaluate(feat)
+        if wf_result.get("available"):
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("**Baseline (moyenne historique)**")
+                st.metric("Hit Rate (sens correct)", f"{wf_result['baseline']['hit_rate']*100:.1f}%")
+                st.metric("Corrélation", f"{wf_result['baseline']['correlation']:.3f}")
+            with c2:
+                st.markdown("**Ridge (walk-forward)**")
+                st.metric("Hit Rate (sens correct)", f"{wf_result['ridge']['hit_rate']*100:.1f}%")
+                st.metric("Corrélation", f"{wf_result['ridge']['correlation']:.3f}")
+            st.caption(f"Échantillon OOS : {wf_result['n_oos_samples']} observations "
+                       f"réparties sur {model.n_folds} folds walk-forward.")
+            if wf_result["ridge_better"]:
+                st.success("✅ Ridge apporte un gain mesurable vs la baseline sur cette période.")
+            else:
+                st.info("ℹ Ridge n'apporte pas de gain net vs la baseline simple sur cette période "
+                        "— la baseline reste un choix raisonnable pour cet ETF.")
+
+            # Prédiction du jour (modèle final, entraîné sur tout l'historique)
+            prod_model, scaler = model.fit_production_model(feat)
+            pred_today = model.predict_today(feat, prod_model, scaler)
+            if pred_today is not None:
+                st.markdown(f"**Alpha attendu à 20 jours (aujourd'hui) : {pred_today*100:+.2f}%** "
+                            f"<span style='color:#6B7585;font-size:.8rem;'>(modèle de production, à titre indicatif)</span>",
+                            unsafe_allow_html=True)
+        else:
+            st.warning(wf_result.get("reason", "Walk-forward indisponible."))
+
+        # --- Section 2 : Backtest A/B/C/D ---
+        st.markdown("### 2️⃣ Backtest comparatif — Stratégies A/B/C/D")
+        bt = BacktestEngine(CRASH_THRESHOLDS, UNDERPERF_THRESHOLDS)
+        bt_results = bt.run(self.dm, ticker, feat)
+
+        rows = []
+        for name, label in [("A_BuyHold", "A — Buy & Hold"), ("B_SignalNoDelay", "B — Signal sans délai"),
+                            ("C_SignalLinxeaDelay", "C — Signal + délai Linxea"),
+                            ("D_SignalStress", "D — Signal + stress (+1 séance)")]:
+            m = bt_results.get(name, {})
+            if not m.get("available"):
+                continue
+            rows.append({
+                "Stratégie": label, "Rendement total": f"{m['total_return_pct']:+.1f}%",
+                "CAGR": f"{m['cagr_pct']:+.1f}%", "Volatilité": f"{m['vol_pct']:.1f}%",
+                "Max Drawdown": f"{m['max_drawdown_pct']:.1f}%", "Sharpe": f"{m['sharpe']:.2f}",
+                "Calmar": f"{m['calmar']:.2f}", "Alpha vs World": f"{m['alpha_vs_world_pct']:+.1f}%",
+                "Pire jour": f"{m['worst_day_pct']:.1f}%", "Pire 5j": f"{m['worst_5d_pct']:.1f}%",
+                "Nb trades": m['n_trades'],
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        fig = go.Figure()
+        colors = {"A_BuyHold": "#6B7585", "B_SignalNoDelay": "#3B82F6",
+                  "C_SignalLinxeaDelay": "#D4AF37", "D_SignalStress": "#FF3131"}
+        for name, color in colors.items():
+            m = bt_results.get(name, {})
+            if m.get("available"):
+                st.session_state.setdefault("_bt_curves", {})
+                ec = m["equity_curve"]
+                fig.add_trace(go.Scatter(x=ec.index, y=(ec - 1) * 100, name=name, line=dict(color=color)))
+        fig.update_layout(**_PLOTLY_BASE, height=320, margin=dict(t=30, b=30, l=50, r=20),
+                           yaxis=dict(title="Performance cumulée (%)", gridcolor="#2E3340"),
+                           xaxis=dict(gridcolor="#2E3340"),
+                           legend=dict(orientation="h", y=1.1))
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+        # --- Section 3 : Calibration des seuils ---
+        st.markdown("### 3️⃣ Calibration des seuils (grid search hors-échantillon)")
+        st.caption("Recherche sur 70% de l'historique (train), validation sur les 30% restants "
+                   "jamais vus pendant la recherche (test). Garde-fou : un jeu de seuils qui "
+                   "détruit le CAGR de plus de 60% vs Buy & Hold est automatiquement rejeté.")
+        if st.button("🔍 Lancer la calibration (peut prendre 10-30 secondes)", key=f"calib_{ticker}"):
+            with st.spinner("Grid search en cours (jusqu'à 100 combinaisons testées)..."):
+                calib = CalibrationEngine(self.dm)
+                calib_res = calib.calibrate(ticker, feat)
+            if calib_res.get("available"):
+                best = calib_res["best_thresholds"]
+                st.success(f"✅ {calib_res['n_combinations_tested']} combinaisons valides testées.")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Seuil Alpha20 optimal", f"{best['alpha20']*100:.0f}%")
+                c2.metric("Seuil Vol Ratio optimal", f"{best['vol_ratio']:.2f}")
+                c3.metric("Seuil DD 5j optimal", f"{best['dd_5d']*100:.0f}%")
+
+                oos = calib_res["oos_validation"]
+                default_oos = calib_res["default_thresholds_oos"]
+                if oos.get("available") and default_oos.get("available"):
+                    cA, cB = st.columns(2)
+                    with cA:
+                        st.markdown("**Seuils actuels (par défaut) — validation OOS**")
+                        st.write(f"Calmar : {default_oos['calmar']:.2f} · CAGR : {default_oos['cagr_pct']:+.1f}% "
+                                 f"· Max DD : {default_oos['max_drawdown_pct']:.1f}%")
+                    with cB:
+                        st.markdown("**Seuils calibrés — validation OOS**")
+                        st.write(f"Calmar : {oos['calmar']:.2f} · CAGR : {oos['cagr_pct']:+.1f}% "
+                                 f"· Max DD : {oos['max_drawdown_pct']:.1f}%")
+                    if calib_res["improvement"] and calib_res["improvement"] > 0:
+                        st.success(f"📈 Amélioration du Calmar hors-échantillon : "
+                                  f"{calib_res['improvement']:+.2f}")
+                    else:
+                        st.info("Pas d'amélioration nette hors-échantillon — "
+                               "gardez vos seuils par défaut pour cet ETF.")
+            else:
+                st.warning(calib_res.get("reason", "Calibration indisponible."))
 
     def render_long_term_cockpit(self, ptf: Dict, analytics_engine: AnalyticsEngine, regime: Dict):
         st.markdown("## 📈 Cockpit Décisionnel Long Terme — Analyse de tous les ETF disponibles")
@@ -3749,6 +4521,212 @@ class StreamlitUI:
                 st.rerun()
 
 # -----------------------------------------------------------------------------
+# MODULE 15 : VISUALISATIONS (corrigées avec get_world_series)
+# -----------------------------------------------------------------------------
+_PLOTLY_BASE = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#CBD5E1", family="DM Sans"))
+
+def plot_equity_curve(history: pd.DataFrame) -> Optional[go.Figure]:
+    if history.empty or "capital_cloture" not in history.columns:
+        return None
+    df = history.dropna(subset=["capital_cloture"]).copy()
+    if len(df) < 2:
+        return None
+    df["date_dt"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date_dt"]).sort_values("date_dt")
+    fig = go.Figure()
+    regime_colors = {
+        "Euphorie": "rgba(168,85,247,.10)", "Expansion": "rgba(34,197,94,.10)",
+        "Neutre": "rgba(59,130,246,.08)", "Stress": "rgba(245,158,11,.10)",
+        "Contraction": "rgba(255,49,49,.12)"
+    }
+    if "regime" in df.columns:
+        prev = None
+        x0 = df["date_dt"].iloc[0]
+        for _, row in df.iterrows():
+            if row.get("regime") != prev and prev is not None:
+                fig.add_vrect(x0=x0, x1=row["date_dt"], fillcolor=regime_colors.get(prev, "rgba(255,255,255,.03)"), layer="below", line_width=0)
+                x0 = row["date_dt"]
+            prev = row.get("regime")
+        if prev:
+            fig.add_vrect(x0=x0, x1=df["date_dt"].iloc[-1], fillcolor=regime_colors.get(prev, "rgba(255,255,255,.03)"), layer="below", line_width=0)
+    fig.add_trace(go.Scatter(x=df["date_dt"], y=df["capital_cloture"], mode="lines+markers",
+                            line=dict(color="#D4AF37", width=2.5), marker=dict(size=5), name="Capital Clôture"))
+    if "perf_cumul" in df.columns and df["perf_cumul"].notna().any():
+        fig.add_trace(go.Scatter(x=df["date_dt"], y=df["perf_cumul"], mode="lines",
+                                line=dict(color="#3B82F6", width=1.5, dash="dot"), name="Perf Cumul (%)", yaxis="y2"))
+    fig.update_layout(
+        **_PLOTLY_BASE,
+        title=dict(text="<b>Évolution de votre capital</b>", font=dict(size=13, color="#6B7585")),
+        margin=dict(t=40, b=30, l=60, r=60), height=280,
+        legend=dict(font=dict(size=10), bgcolor="rgba(0,0,0,0)", x=0, y=1.15, orientation="h"),
+        xaxis=dict(gridcolor="#2E3340", showgrid=True),
+        yaxis=dict(gridcolor="#2E3340", showgrid=True, ticksuffix="€", title="Capital (€)"),
+        yaxis2=dict(overlaying="y", side="right", showgrid=False, ticksuffix="%", title="Perf (%)")
+    )
+    return fig
+
+def plot_weekly_leadership(labels: List[str], sat_perfs: List[float], world_perfs: List[float],
+                           sat_name: str, color_sat: str = "#D4AF37") -> go.Figure:
+    fig = go.Figure()
+    bar_colors_sat = ["#22C55E" if v > 0 else "#FF3131" for v in sat_perfs]
+    fig.add_trace(go.Bar(x=labels, y=sat_perfs, name=sat_name, marker_color=bar_colors_sat,
+                         text=[f"{v:+.1f}%" for v in sat_perfs], textposition="outside"))
+    bar_colors_world = ["rgba(59,130,246,.7)" if v > 0 else "rgba(59,130,246,.4)" for v in world_perfs]
+    fig.add_trace(go.Bar(x=labels, y=world_perfs, name="MSCI World", marker_color=bar_colors_world,
+                         text=[f"{v:+.1f}%" for v in world_perfs], textposition="outside"))
+    fig.add_hline(y=0, line_dash="dot", line_color="#4B5563", opacity=0.8)
+    fig.update_layout(
+        **_PLOTLY_BASE, barmode="group", bargap=0.20, bargroupgap=0.05,
+        title=dict(text=f"<b>Leadership hebdomadaire : {sat_name} vs MSCI World</b>", font=dict(size=13, color="#6B7585")),
+        margin=dict(t=50, b=40, l=50, r=30), height=300,
+        legend=dict(font=dict(size=11), bgcolor="rgba(0,0,0,0)", x=0, y=1.12, orientation="h"),
+        xaxis=dict(gridcolor="#2E3340", showgrid=False), yaxis=dict(gridcolor="#2E3340", ticksuffix="%", zeroline=False)
+    )
+    return fig
+
+def plot_correlation_heatmap(corr_df: pd.DataFrame) -> go.Figure:
+    short = {
+        "WMMS.DE": "WMMS", "MWRD.PA": "World", "DCAM.PA": "W-PEA",
+        "KRW.PA": "Korea", "CHIP.PA": "CHIP", "LYXTNOW.PA": "InfoTech", "IJPE.PA": "JapSC",
+        "CV9.PA": "EuVal", "LYXFINW.PA": "Fin"
+    }
+    labels = [short.get(c, c) for c in corr_df.columns]
+    fig = go.Figure(go.Heatmap(
+        z=corr_df.values.round(2), x=labels, y=labels,
+        colorscale=[[0, "#FF3131"], [0.5, "#252932"], [1, "#22C55E"]],
+        zmid=0, zmin=-1, zmax=1,
+        text=corr_df.values.round(2), texttemplate="%{text:.2f}",
+        hovertemplate="<b>%{y} / %{x}</b><br>ρ = %{z:.2f}<extra></extra>",
+        showscale=True,
+        colorbar=dict(tickfont=dict(color="#CBD5E1", size=9), thickness=12, len=0.8, bgcolor="rgba(0,0,0,0)")
+    ))
+    fig.update_layout(
+        **_PLOTLY_BASE,
+        title=dict(text="<b>Corrélation Pearson (60j)</b>", font=dict(size=12, color="#6B7585")),
+        margin=dict(t=40, b=10, l=60, r=20), height=220
+    )
+    return fig
+
+def plot_risk_contribution(rc: Dict) -> Optional[go.Figure]:
+    if not rc:
+        return None
+    short = {
+        "WMMS.DE": "WMMS", "MWRD.PA": "World", "DCAM.PA": "W-PEA",
+        "KRW.PA": "Korea", "CHIP.PA": "CHIP"
+    }
+    names = [short.get(tk, tk) for tk in rc]
+    values = [rc[tk]["rc_pct"] for tk in rc]
+    colors = ["#FF3131" if rc[tk]["flag"] else "#007BFF" for tk in rc]
+    fig = go.Figure(go.Bar(x=values, y=names, orientation="h", marker_color=colors,
+                           hovertemplate="%{y}: <b>%{x:.1f}%</b>"))
+    fig.add_vline(x=40, line_dash="dash", line_color="#FF3131",
+                  annotation_text="Seuil 40%", annotation_font=dict(color="#FF3131", size=9))
+    fig.update_layout(
+        **_PLOTLY_BASE,
+        title=dict(text="<b>Risk Contribution (%)</b>", font=dict(size=12, color="#6B7585")),
+        margin=dict(t=40, b=10, l=80, r=20), height=200,
+        xaxis=dict(gridcolor="#2E3340", ticksuffix="%"), yaxis=dict(gridcolor="rgba(0,0,0,0)")
+    )
+    return fig
+
+def plot_weight_indicator(current_pct: float, target_pct: float) -> go.Figure:
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number+delta",
+        value=round(current_pct, 1),
+        number={"suffix": "%", "font": {"size": 26, "color": "#CBD5E1", "family": "Space Mono"}},
+        delta={"reference": target_pct, "relative": False, "increasing": {"color": "#F97316"},
+               "decreasing": {"color": "#22C55E"}, "suffix": "%", "valueformat": ".1f"},
+        title={"text": "Poids Actuel<br><span style='font-size:.8em;color:#6B7585'>vs Cible (or)</span>",
+               "font": {"size": 11, "color": "#8892AA"}},
+        gauge={
+            "axis": {"range": [0, 35], "tickcolor": "#6B7585", "tickfont": {"size": 9}, "nticks": 8},
+            "bar": {"color": "#007BFF", "thickness": 0.28},
+            "bgcolor": "rgba(0,0,0,0)", "borderwidth": 0,
+            "steps": [
+                {"range": [0, 5], "color": "rgba(255,49,49,.18)"},
+                {"range": [5, 15], "color": "rgba(249,115,22,.12)"},
+                {"range": [15, 25], "color": "rgba(34,197,94,.12)"},
+                {"range": [25, 35], "color": "rgba(212,175,55,.10)"}
+            ],
+            "threshold": {"line": {"color": "#D4AF37", "width": 4}, "thickness": 0.85,
+                          "value": round(target_pct, 1)}
+        }
+    ))
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)", font={"color": "#CBD5E1", "family": "DM Sans"},
+        margin={"t": 50, "b": 10, "l": 20, "r": 20}, height=230
+    )
+    return fig
+
+def plot_alpha_bars(dm: DataManager, ticker: str, nom: str) -> Optional[go.Figure]:
+    """Écart quotidien vs le vrai World (via get_world_series)"""
+    world = get_world_series(dm, exclude_ticker=ticker)
+    if world.empty:
+        return None
+    sat_df = dm.data.get(ticker, pd.DataFrame())
+    if sat_df is None or sat_df.empty:
+        return None
+    wc = world
+    sc = sat_df["Close"].dropna()
+    common = sc.index.intersection(wc.index)
+    if len(common) < 17:
+        return None
+    common = common[-16:]
+    alpha = ((sc[common].pct_change() - wc[common].pct_change()) * 100).dropna().iloc[-15:]
+    if alpha.empty:
+        return None
+    fig = go.Figure(go.Bar(
+        x=[d.strftime("%d/%m") for d in alpha.index],
+        y=alpha.values,
+        marker_color=["#22C55E" if v > 0 else "#FF3131" for v in alpha.values]
+    ))
+    fig.add_hline(y=0, line_dash="dot", line_color="#6B7585", opacity=.6)
+    fig.update_layout(
+        **_PLOTLY_BASE,
+        title=dict(text=f"<b>Écart quotidien</b> : {nom} vs MSCI World --- 15 derniers jours",
+                   font=dict(size=11, color="#6B7585")),
+        margin=dict(t=35, b=25, l=55, r=15), height=200,
+        showlegend=False, xaxis=dict(gridcolor="#2E3340", showgrid=False),
+        yaxis=dict(gridcolor="#2E3340", ticksuffix="%")
+    )
+    return fig
+
+def plot_relative_perf(dm: DataManager, ticker: str, nom: str) -> Optional[go.Figure]:
+    """Performance relative vs le vrai World (via get_world_series)"""
+    world = get_world_series(dm, exclude_ticker=ticker)
+    if world.empty:
+        return None
+    sat_df = dm.data.get(ticker, pd.DataFrame())
+    if sat_df is None or sat_df.empty:
+        return None
+    wc = world
+    sc = sat_df["Close"].dropna()
+    common = sc.index.intersection(wc.index)
+    if len(common) < 20:
+        return None
+    cutoff = max(DATE_DEBUT.date(), (datetime.now() - timedelta(days=120)).date())
+    common_f = [d for d in common if d.date() >= cutoff] or list(common[-90:])
+    ratio = sc[common_f] / wc[common_f]
+    rel = (ratio / ratio.iloc[0] - 1) * 100
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=rel.index, y=rel.values.clip(min=0), fill="tozeroy",
+                             fillcolor="rgba(212,175,55,.12)", line=dict(color="rgba(0,0,0,0)"), showlegend=False))
+    fig.add_trace(go.Scatter(x=rel.index, y=rel.values.clip(max=0), fill="tozeroy",
+                             fillcolor="rgba(255,49,49,.12)", line=dict(color="rgba(0,0,0,0)"), showlegend=False))
+    fig.add_trace(go.Scatter(x=rel.index, y=rel.values, line=dict(color="#D4AF37", width=2), name=f"{nom}/World"))
+    if len(rel) >= 14:
+        last14 = rel.iloc[-14:]
+        fig.add_vrect(x0=last14.index[0], x1=last14.index[-1], fillcolor="rgba(0,123,255,.06)", layer="below", line_width=0)
+    fig.add_hline(y=0, line_dash="dot", line_color="#6B7585", opacity=.7)
+    fig.update_layout(
+        **_PLOTLY_BASE,
+        title=dict(text=f"Performance relative : {nom} vs World (base 100)", font=dict(size=11, color="#6B7585")),
+        margin=dict(t=20, b=20, l=50, r=20), height=200,
+        showlegend=False, xaxis=dict(gridcolor="#2E3340"), yaxis=dict(gridcolor="#2E3340", ticksuffix="%")
+    )
+    return fig
+
+# -----------------------------------------------------------------------------
 # MODULE 17 : MAIN
 # -----------------------------------------------------------------------------
 def _load_config() -> Dict:
@@ -3861,7 +4839,9 @@ def main():
         live_ok = sum(1 for v in dm.live.values() if v.get("prix"))
         live_total = len(dm.live)
 
-    tab_dashboard, tab_transactions, tab_screener = st.tabs(["📊 Dashboard", "📈 Transactions", "🔍 Screener"])
+    tab_dashboard, tab_transactions, tab_screener, tab_backtest = st.tabs(
+        ["📊 Dashboard", "📈 Transactions", "🔍 Screener", "🧪 Backtest & Calibration"]
+    )
 
     with tab_dashboard:
         ui.render_header(mode_direct, live_ok, live_total)
@@ -3881,9 +4861,8 @@ def main():
         st.markdown(f'<div class="phase-banner" style="background:{phase_color};color:white;">{phase_text}</div>', unsafe_allow_html=True)
         ui.render_command_center(ptf, bench, mode_direct, pm)
         
-        # ---- NOUVEAU : Performance hebdomadaire du portefeuille vs World ----
+        # ---- Performance hebdomadaire du portefeuille vs World ----
         ui.render_portfolio_leadership_comparison(ptf)
-        # ----------------------------------------------------------------
         
         ui.render_equity_curve_section(ptf, regime, positions_conf)
         ui.render_risk_dashboard(ptf)
@@ -3940,7 +4919,8 @@ def main():
                     ui.render_satellite_card_pedagogic("MSCI Semiconductors", "CHIP.PA", chip_unified, chip_target, regime, sent_rows, "chip", gap_vs_world=chip_gap)
 
         ui.render_sentinelles_macro(ptf)
-        ui.render_quant_alert(ptf)
+        # Nouvelle alerte quant v2
+        ui.render_quant_alert_v2(ptf, positions_conf)
         ui.render_long_term_cockpit(ptf, AnalyticsEngine(dm), regime)
         ui.render_fiscal_simulator(ptf)
         ui.render_position_sizing(ptf, regime["confirmed_label"])
@@ -3952,6 +4932,9 @@ def main():
 
     with tab_screener:
         ui.render_screener_tab()
+
+    with tab_backtest:
+        ui.render_backtest_calibration_tab(ptf)
 
 if __name__ == "__main__" or True:
     main()
