@@ -1,13 +1,13 @@
 # =============================================================================
-# COCKPIT DÉCISIONNEL BOURSIER v6.5 — "ALERTE QUANT & ALLOCATION"
+# COCKPIT DÉCISIONNEL BOURSIER v6.6 — "ALERTE QUANT & ALLOCATION"
 # =============================================================================
-# v6.5 : Corrections majeures
-#   • PortfolioConfigManager.load_positions() garantit la présence des 5 ETF
-#     (WMMS.DE, DCAM.PA, MWRD.PA, KRW.PA, CHIP.PA) même si le fichier est incomplet
-#   • Screener : affiche désormais TOUS les ETFs de la bibliothèque (même ceux
-#     sans données historiques), avec score 0 et métriques N/A
-#   • Suppression du filtre if yf_ticker not in self.dm.data
-#   • Conservation de l'intégralité des fonctionnalités v6.4
+# v6.6 : Corrections majeures
+#   • FORCE la présence des 5 ETF de base (WMMS.DE, DCAM.PA, MWRD.PA, KRW.PA, CHIP.PA)
+#     dans le portefeuille, même si le fichier portfolio_positions.json est incomplet
+#   • Rechargement systématique des positions à chaque démarrage pour éviter
+#     les sessions obsolètes
+#   • Screener : affiche TOUS les ETFs de la bibliothèque (même sans données)
+#   • Conservation de toutes les fonctionnalités v6.5
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -36,14 +36,14 @@ except ImportError:
     PYGITHUB_OK = False
 
 st.set_page_config(
-    page_title="Cockpit v6.5 · Alerte Quant & Allocation",
+    page_title="Cockpit v6.6 · Alerte Quant & Allocation",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # -----------------------------------------------------------------------------
-# MODULE 1 : CSS
+# MODULE 1 : CSS (inchangé)
 # -----------------------------------------------------------------------------
 st.markdown("""
 <style>
@@ -2426,7 +2426,7 @@ class StreamlitUI:
         return "+" if v >= 0 else ""
 
     def render_sidebar(self) -> Tuple[bool, List[Dict], float, float, float]:
-        st.sidebar.markdown("## ⚙ Paramètres v6.5")
+        st.sidebar.markdown("## ⚙ Paramètres v6.6")
         mode_direct = st.sidebar.toggle("🔌 Mode Direct (Vue Brute)", value=False)
         st.sidebar.markdown("---")
         cap = st.sidebar.number_input("Capital investi (€)", value=st.session_state["cfg_capital_reel"], step=100.0, format="%.2f", key="input_capital_reel")
@@ -2531,7 +2531,7 @@ class StreamlitUI:
         st.markdown('<div style="display:flex;align-items:baseline;gap:1rem;margin-bottom:.2rem;">'
                     '<span style="font-family:Space Mono;font-size:1.6rem;font-weight:700;color:#D4AF37;">◈</span>'
                     '<span style="font-size:1.5rem;font-weight:700;color:#E2E8F0;">COCKPIT DÉCISIONNEL</span>'
-                    '<span style="font-family:Space Mono;font-size:.9rem;color:#6B7585;">v6.5 · ALERTE QUANT</span></div>', unsafe_allow_html=True)
+                    '<span style="font-family:Space Mono;font-size:.9rem;color:#6B7585;">v6.6 · ALERTE QUANT</span></div>', unsafe_allow_html=True)
         c1, c2 = st.columns([3, 1])
         with c1:
             st.caption(f"Prix live · {now.strftime('%d/%m/%Y %H:%M:%S')} (Paris) · Cache 30s/90s")
@@ -2721,7 +2721,7 @@ class StreamlitUI:
         if mwr_adj is not None:
             gap = bench.get("gap", 0.0) or 0.0
             gc = "#22C55E" if gap >= 0 else "#FF3131"
-            st.markdown(f'<div class="pedagogy-box"><div class="pedagogy-title">🆕 v6.5 --- Benchmark MWR Cash-Flow Adjusted</div>'
+            st.markdown(f'<div class="pedagogy-box"><div class="pedagogy-title">🆕 v6.6 --- Benchmark MWR Cash-Flow Adjusted</div>'
                         f'Le "Gap vs World" est calculé en simulant l\'achat de MWRD.PA aux mêmes dates et montants que vos flux réels. '
                         f'<b>World MWR = {s(mwr_adj)}{mwr_adj:.2f}%</b> · '
                         f'<b style="color:{gc};">Votre Alpha = {s(gap)}{gap:.2f}%</b></div>', unsafe_allow_html=True)
@@ -3485,7 +3485,7 @@ class StreamlitUI:
             s = self._sign
             mode_txt = "🔌 MODE DIRECT" if mode_direct else "Ajust. patrimonial actif"
             persist = "GitHub Gist + SQLite" if self.pm.status == "github" else "SQLite local"
-            st.caption(f"◈ Cockpit v6.5 · Alerte Quant · {mode_txt} · "
+            st.caption(f"◈ Cockpit v6.6 · Alerte Quant · {mode_txt} · "
                        f"Régime : {regime_label} · Capital {capital:,.2f}€ · Persistance : {persist} · {live_ok}/{live_total} prix live · "
                        f"Benchmark : MWR Cash-Flow Adjusted · Outil personnel --- Ne constitue pas un conseil en investissement")
         with col_f2:
@@ -3527,6 +3527,32 @@ def _save_config(capital_reel: float, ajustement_pat: float, bonus_fortuneo: flo
         return False
 
 def main():
+    # Forcer le rechargement des positions depuis le fichier à chaque démarrage
+    pcm = PortfolioConfigManager()
+    raw = pcm.load_positions()
+    # S'assurer que les cinq positions de base sont présentes
+    required = ["WMMS.DE", "DCAM.PA", "MWRD.PA", "KRW.PA", "CHIP.PA"]
+    existing_tickers = {pos["ticker"] for pos in raw}
+    for ticker in required:
+        if ticker not in existing_tickers:
+            # Ajouter la position par défaut
+            for default in [
+                {"ticker": "WMMS.DE", "parts": 461.9561, "prm": 13.582, "account": "AV"},
+                {"ticker": "DCAM.PA", "parts": 508.0000, "prm": 4.983, "account": "PEA"},
+                {"ticker": "MWRD.PA", "parts": 16.6229, "prm": 149.718, "account": "AV"},
+                {"ticker": "KRW.PA", "parts": 14.8501, "prm": 142.370, "account": "AV"},
+                {"ticker": "CHIP.PA", "parts": 21.4922, "prm": 99.159, "account": "AV"},
+            ]:
+                if default["ticker"] == ticker:
+                    raw.append(default)
+                    break
+    # Sauvegarder les positions mises à jour dans le fichier
+    pcm.save_positions(raw)
+    # Mettre à jour la session
+    st.session_state["raw_positions"] = raw
+    st.session_state["positions"] = enrich_positions(raw)
+
+    # Chargement des paramètres
     if "config_loaded" not in st.session_state:
         cfg = _load_config()
         st.session_state["cfg_capital_reel"] = cfg["capital_reel"]
@@ -3534,18 +3560,12 @@ def main():
         st.session_state["cfg_bonus_fortuneo"] = cfg["bonus_fortuneo"]
         st.session_state["config_loaded"] = True
         st.session_state["save_feedback"] = ""
-    if "raw_positions" not in st.session_state:
-        pcm_init = PortfolioConfigManager()
-        raw = pcm_init.load_positions()
-        st.session_state["raw_positions"] = raw
-        st.session_state["positions"] = enrich_positions(raw)
 
     with st.spinner("📡 Chargement des données de marché..."):
         dm = DataManager()
         if not dm.live:
             st.error("❌ Aucun prix live. Vérifiez votre connexion.")
             st.stop()
-        pcm = PortfolioConfigManager()
         te = TransactionEngine()
         pm = PersistenceManager(static_capital=st.session_state["cfg_capital_reel"])
         mre = MarketRegimeEngine(dm)
