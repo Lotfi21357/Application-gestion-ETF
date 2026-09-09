@@ -11,6 +11,7 @@
 #   • Screener : distinction Score=0 vs Données indisponibles (N/A)
 #   • Toutes les fonctionnalités v6.8 conservées
 #   • AJOUT : Comparaison hebdomadaire portefeuille vs World (section dédiée)
+#   • FIX : get_portfolio_weekly_performances utilise les fallbacks et aligne les dates
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -2030,7 +2031,7 @@ class QuantAlertEngine:
         }
 
 # -----------------------------------------------------------------------------
-# MODULE 12 : PEDAGOGIC ENGINE (ajout get_portfolio_weekly_performances)
+# MODULE 12 : PEDAGOGIC ENGINE (amélioration get_portfolio_weekly_performances)
 # -----------------------------------------------------------------------------
 class PedagogicEngine:
     def translate_volatility(self, vol: Optional[float], asset_name: str) -> Dict:
@@ -2151,17 +2152,26 @@ class PedagogicEngine:
         positions : liste de dict avec 'ticker' et 'parts'
         Retourne : labels, perf_portefeuille (%), perf_world (%)
         """
-        # Récupérer les séries de prix pour chaque ticker
+        # Récupérer les séries de prix pour chaque ticker en utilisant les fallbacks
         price_series = {}
         for pos in positions:
             ticker = pos.get('ticker')
             if not ticker:
                 continue
             meta = ETF_LIBRARY.get(ticker, {})
-            yf_ticker = meta.get('yf', ticker)
-            df = dm.data.get(yf_ticker)
-            if df is not None and not df.empty and 'Close' in df.columns:
-                price_series[ticker] = df['Close'].dropna()
+            candidates = [meta.get('yf')] + meta.get('yf_fallbacks', [])
+            candidates = [t for t in candidates if t]
+            found = False
+            for t in candidates:
+                df = dm.data.get(t)
+                if df is not None and not df.empty and 'Close' in df.columns:
+                    price_series[ticker] = df['Close'].dropna()
+                    found = True
+                    break
+            if not found:
+                # Si aucun ticker ne fonctionne, on ignore cet ETF
+                continue
+
         if not price_series:
             return [], [], []
 
@@ -2896,7 +2906,7 @@ class StreamlitUI:
         positions = ptf["positions"]
         labels, port_perfs, world_perfs = self.pde.get_portfolio_weekly_performances(self.dm, positions, n_weeks=5)
         if not labels:
-            st.info("Données hebdomadaires insuffisantes pour le portefeuille (besoin d'au moins 2 semaines de données).")
+            st.info("Données hebdomadaires insuffisantes pour le portefeuille (besoin d'au moins 2 semaines de données historiques).")
             return
 
         # Graphique
@@ -2912,7 +2922,6 @@ class StreamlitUI:
                     f'<div style="font-weight:700;font-size:1.1rem;color:{level_color};">{verdict["message"]}</div>'
                     f'<div style="font-size:.9rem;color:#8892AA;margin:.4rem 0;">{verdict["detail"]}</div>'
                     f'<div style="font-size:.9rem;color:#CBD5E1;">💡 {verdict["action"]}</div></div>', unsafe_allow_html=True)
-
     # ---- Fin nouvelle section ----
 
     def render_equity_curve_section(self, ptf: Dict, regime: Dict, positions_conf: List[Dict]):
