@@ -1,14 +1,13 @@
 # =============================================================================
-# COCKPIT DÉCISIONNEL BOURSIER v7.2 — RISK ENGINE SPÉCIALISÉ PAR ETF
+# COCKPIT DÉCISIONNEL BOURSIER v7.3 — RISK ENGINE SPÉCIALISÉ + POCHES STRATÉGIQUES
 # =============================================================================
-# v7.2 : Ajouts
-#   • MODULE 28 : ETF Specialized Risk Engine (Korea, Semi, World, World Value)
-#   • MODULE 29 : Validation historique (SR vs rendements futurs corrigée)
-#   • MODULE 30 : Optimisation de la réduction (25%/50% validés empiriquement)
-#   • MODULE 31 : Couche pédagogique + verdict consolidé
-#   • Onglet dédié "🛡 Risk Engine v7.1" avec 3 sous-onglets
-#   • Corrections senior : forward_min exclusif, stats complètes, DQ, persistance
-#     par fréquence, unités explicites (bps, %), RSG brut ET pondéré qualité
+# v7.3 : Ajouts
+#   • MODULE 32 : Poches stratégiques (World Core, World Value, Satellites)
+#   • Glossaires complets pour chaque section technique (Partie A)
+#   • Correctif : DCAM.PA / MWRD.PA ne sont plus traités comme 2 actifs concurrents
+#   • Analyse des thèses utilisateur (Value tilt, Semiconductor vs Korea)
+#   • HISTORICAL_DAYS porté à 10 ans (améliore World et World Value)
+#   • Sélecteur de seuil dans l'optimiseur de réduction
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -48,7 +47,7 @@ except ImportError:
     SKLEARN_OK = False
 
 st.set_page_config(
-    page_title="Cockpit v7.2 · Risk Engine Spécialisé",
+    page_title="Cockpit v7.3 · Risk Engine Spécialisé",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -110,7 +109,10 @@ section[data-testid="stSidebar"] { background-color: #22252E; border-right: 1px 
 _ANCHOR_DATE = "2026-09-08"
 _ANCHOR_PERF = 17.15
 
-HISTORICAL_DAYS = 1500
+# MODIFIÉ v7.3 : porté à 10 ans pour améliorer World et World Value.
+# Korea et Semiconductor restent limités par la date de création de leurs ETF (~2019).
+HISTORICAL_DAYS = 3650
+
 BENCHMARK_WORLD_TICKER = "MWRD.PA"
 
 LINXEA_CUTOFF_HOUR = 16
@@ -123,7 +125,6 @@ UNDERPERF_THRESHOLDS = {"alpha20": -0.03, "alpha60": -0.02}
 DECISION_EXIT_SCORE = 5
 DECISION_REENTER_SCORE = 2
 
-# --- AJOUT v7.2 : proxy SOX pour le Risk Engine v7.1 ---
 SOX_COMPONENTS_PROXY = [
     "NVDA", "AVGO", "AMD", "TSM", "QCOM", "TXN", "INTC", "MU", "ADI",
     "LRCX", "KLAC", "AMAT", "MRVL", "NXPI", "MCHP", "ON", "SWKS", "QRVO",
@@ -530,7 +531,6 @@ def _collect_all_yf_tickers() -> List[str]:
     tickers.extend(PROXIES_CHIP)
     tickers.extend(["NVDA", "AAPL", "GOOGL", "GOOG", "MSFT", "AMZN"])
     for tlist in SENTINELLES.values(): tickers.extend(tlist)
-    # --- AJOUT v7.2 : tickers Risk Engine ---
     tickers.extend(["^VIX3M", "KRW=X"])
     tickers.extend(SOX_COMPONENTS_PROXY)
     return list(dict.fromkeys(tickers))
@@ -1233,7 +1233,7 @@ class QuantRiskEngine:
         return float(np.sqrt(w @ cov @ w))
 
 # -----------------------------------------------------------------------------
-# MODULE 9bis : PORTFOLIO OPTIMIZER ENGINE (avec contrainte RC)
+# MODULE 9bis : PORTFOLIO OPTIMIZER ENGINE
 # -----------------------------------------------------------------------------
 class PortfolioOptimizerEngine:
     def __init__(self, dm: DataManager):
@@ -2640,7 +2640,7 @@ class CalibrationEngine:
         return float((total ** (1/years) - 1) * 100) if total > 0 else None
 
 # =============================================================================
-# MODULE 28 : ETF SPECIALIZED RISK ENGINE v7.1 (PATCH 1)
+# MODULE 28 : ETF SPECIALIZED RISK ENGINE v7.1
 # =============================================================================
 FRED_BASE = "https://fred.stlouisfed.org/graph/fredgraph.csv?id="
 
@@ -2668,14 +2668,12 @@ def format_bps(pct_points: float) -> str:
     """Convertit une valeur en points de % (FRED ex: 4.52 = 4.52%) en bps + %."""
     return f"{pct_points*100:.0f} bps ({pct_points:.2f}%)"
 
-# --- POINT 8 : constantes nommées, unités explicites (décimal = fraction) ---
 TSS_STRONG_CONTANGO = 0.015
 TSS_NEUTRAL_MAX = 0.005
 TSS_BACKWARD_STRESS = -0.010
 VIX_CALM_LEVEL = 18.0
 VIX_STRESS_LEVEL = 30.0
 
-# --- POINT 10 : persistance par fréquence d'indicateur ---
 PERSISTENCE_CONFIG = {
     "korea":  {"window": 5,  "threshold": 0.60},
     "semi":   {"window": 5,  "threshold": 0.60},
@@ -2683,12 +2681,8 @@ PERSISTENCE_CONFIG = {
     "value":  {"window": 10, "threshold": 0.70},
 }
 
-# --- POINT 13/14 : qualité des données (DQ) par moteur ---
-# PATCH 1 : DQ réaliste, sans faire semblant qu'un bloc "ISM" fiable existe
 DQ_BASE = {"korea": 0.45, "semi": 0.80, "world": 1.00, "value": 1.00}
 
-
-# --- PATCH 1 : NOUVELLE fonction remplaçant fetch_fred_series("NAPM") ---
 def fetch_us_cyclical_proxy() -> Tuple[pd.Series, str]:
     """Retourne (série de croissance YoY en %, nom de la série utilisée).
     NAPM (ISM manufacturier) n'est plus publié sur FRED depuis 2016 (litige de licence
@@ -2697,7 +2691,7 @@ def fetch_us_cyclical_proxy() -> Tuple[pd.Series, str]:
     s = fetch_fred_series("AMTMNO")
     if s.empty:
         return pd.Series(dtype=float), "INDISPONIBLE"
-    yoy = s.pct_change(12) * 100   # données mensuelles -> variation sur 12 mois
+    yoy = s.pct_change(12) * 100
     return yoy.dropna(), "AMTMNO (nouvelles commandes manufacturières US)"
 
 
@@ -2712,7 +2706,6 @@ class KoreaRiskEngine:
         details = {}
         dq = DQ_BASE["korea"]
 
-        # --- Proxy crédit : volatilité KRW/USD (percentile) ---
         krw_usd = self.dm.data.get("KRW=X", pd.DataFrame())
         credit_proxy_signal = False
         if not krw_usd.empty and "Close" in krw_usd.columns:
@@ -2729,7 +2722,6 @@ class KoreaRiskEngine:
         else:
             dq -= 0.10
 
-        # --- Proxy cyclique US (remplace l'ancien NAPM cassé) ---
         yoy_series, source_name = fetch_us_cyclical_proxy()
         us_cyclical_signal = False
         if not yoy_series.empty:
@@ -2747,7 +2739,6 @@ class KoreaRiskEngine:
             dq -= 0.15
             details["us_cyclical_proxy_label"] = "❌ Source FRED indisponible actuellement — bloc désactivé"
 
-        # --- Confirmation technique ---
         krw_etf = self.dm.data.get("KRW.PA", pd.DataFrame())
         vol_confirm = False
         if not krw_etf.empty and "Close" in krw_etf.columns:
@@ -2891,11 +2882,8 @@ class RiskEngineV71:
         self.engines = {"korea": KoreaRiskEngine(dm), "semi": SemiconductorRiskEngine(dm),
                          "world": WorldRiskEngine(dm), "value": WorldValueRiskEngine(dm)}
 
-    # --- PATCH 1 : _update_persistence indexée par DATE réelle ---
     def _update_persistence(self, key: str, raw_score: int) -> Dict:
-        """CORRECTION CRITIQUE : la persistance est maintenant indexée par DATE réelle,
-        pas par nombre de rechargements de page. Recharger la page 10 fois dans la même
-        journée n'ajoute plus 10 entrées fictives à l'historique — une seule par jour."""
+        """Persistance indexée par DATE réelle, pas par nombre de rechargements."""
         cfg = PERSISTENCE_CONFIG[key]
         today = datetime.now(ZoneInfo("Europe/Paris")).strftime("%Y-%m-%d")
         store_key = f"_risk_v71_history_{key}"
@@ -2905,8 +2893,6 @@ class RiskEngineV71:
             history = history[-cfg["window"]:]
             st.session_state[store_key] = history
         else:
-            # Même jour : on met à jour la valeur du jour (le marché a pu bouger),
-            # sans dupliquer l'entrée.
             history[-1]["score"] = raw_score
             st.session_state[store_key] = history
 
@@ -2944,14 +2930,13 @@ class RiskEngineV71:
                 "regime_label": regime_raw[0], "regime_color": regime_raw[1]}
 
 # =============================================================================
-# MODULE 29 : RISK ENGINE V7.1 — VALIDATION HISTORIQUE (corrigée)
+# MODULE 29 : RISK ENGINE V7.1 — VALIDATION HISTORIQUE
 # =============================================================================
 RISK_HORIZONS = [5, 10, 20, 60]
 KEY_PERSISTENCE_CONFIG = PERSISTENCE_CONFIG
 
 def _forward_min_exclusive(series: pd.Series, window: int) -> pd.Series:
-    """POINT 3 : min(P_{t+1}, ..., P_{t+window}), EXCLUT P_t.
-    Sans cette exclusion, la baisse mesurée était systématiquement sous-estimée."""
+    """min(P_{t+1}, ..., P_{t+window}), EXCLUT P_t."""
     shifted = series.shift(-1)
     rev = shifted.iloc[::-1]
     m = rev.rolling(window, min_periods=window).min()
@@ -2974,8 +2959,6 @@ def apply_persistence(raw_score: pd.Series, window: int, threshold: float) -> pd
     return confirmed
 
 def compute_conditional_stats(score_confirmed: pd.Series, price: pd.Series) -> pd.DataFrame:
-    """Stats complètes (mean/median/quantiles/probas de drawdown) par score et horizon.
-    POINT 4 : couvre mean, médiane, P05/P25/P75/P95, MDD et P(MDD<-5%/-10%)."""
     common = score_confirmed.index.intersection(price.index)
     if len(common) < 100: return pd.DataFrame()
     score_c = score_confirmed.loc[common]
@@ -3001,11 +2984,7 @@ def compute_conditional_stats(score_confirmed: pd.Series, price: pd.Series) -> p
             })
     return pd.DataFrame(rows)
 
-# --- PATCH 2 : format_conditional_stats avec indicateur de confiance ---
 def format_conditional_stats(stats_df: pd.DataFrame) -> pd.DataFrame:
-    """Version affichable, avec un indicateur de confiance basé sur la taille
-    d'échantillon — pour qu'un score sur 12 jours ne s'affiche pas avec la même
-    autorité visuelle qu'un score sur 700 jours."""
     if stats_df.empty:
         return pd.DataFrame()
 
@@ -3035,7 +3014,6 @@ def format_conditional_stats(stats_df: pd.DataFrame) -> pd.DataFrame:
     out["P(MDD<-10%)"] = stats_df["prob_mdd_lt_10"].map(lambda v: f"{v*100:.0f}%")
     return out
 
-# --- PATCH 1 : compute_korea_score_series avec fetch_us_cyclical_proxy ---
 def compute_korea_score_series(dm: DataManager) -> pd.Series:
     krw_usd = dm.data.get("KRW=X", pd.DataFrame())
     krw_etf = dm.data.get("KRW.PA", pd.DataFrame())
@@ -3055,7 +3033,6 @@ def compute_korea_score_series(dm: DataManager) -> pd.Series:
         sig = (pctile >= 75) & (delta4w > 0)
         credit_signal = sig.reindex(idx).ffill().fillna(False)
 
-    # Même source que le moteur live (AMTMNO), plus NAPM (mort depuis 2016)
     us_cyclical_signal = pd.Series(False, index=idx)
     yoy_series, _ = fetch_us_cyclical_proxy()
     if not yoy_series.empty:
@@ -3194,24 +3171,18 @@ def _cached_conditional_stats(_dm: DataManager, key: str, cache_key: str) -> pd.
     return compute_conditional_stats(confirmed, price)
 
 # =============================================================================
-# MODULE 30 : OPTIMISATION DE LA RÉDUCTION (points 6/7)
+# MODULE 30 : OPTIMISATION DE LA RÉDUCTION
 # =============================================================================
 REDUCTION_GRID = [0, 10, 15, 20, 25, 30, 40, 50]
 
 def compute_eal(reduction_pct: float, expected_mdd_pct: float) -> float:
-    """Expected Avoided Loss = réduction × |drawdown futur attendu|.
-    Ex : réduction 25%, MDD futur attendu -8% -> EAL = 2% de perte évitée sur l'exposition."""
+    """Expected Avoided Loss = réduction × |drawdown futur attendu|."""
     return (reduction_pct / 100.0) * abs(expected_mdd_pct)
 
 
 class ReductionOptimizer:
-    """Teste plusieurs niveaux de réduction R appliqués quand le score confirmé >= trigger_score,
-    et mesure l'impact réel sur CAGR/MaxDD/Sharpe/Calmar/turnover — comparé au Buy&Hold.
-    Répond à la question : la réduction 25%/50% est-elle optimale, ou arbitraire ?"""
-
     def __init__(self, dm: DataManager): self.dm = dm
 
-    # --- PATCH 3 : seuil minimal d'échantillon ---
     def run_for_engine(self, key: str, trigger_score: int = 2) -> Dict:
         score_func = RiskEngineV71Backtester.SCORE_FUNCS[key]
         raw_score = score_func(self.dm)
@@ -3258,7 +3229,6 @@ class ReductionOptimizer:
                                                  if not (np.isnan(m["cagr_pct"]) or np.isnan(buyhold_metrics["cagr_pct"])) else None,
             })
         df_grid = pd.DataFrame(rows)
-        # POINT DE FIABILITÉ : combien de jours ont réellement connu ce signal ?
         n_signal_days = int(active.sum())
         MIN_N_TRUST = 50
         valid = df_grid.dropna(subset=["Calmar"])
@@ -3283,7 +3253,7 @@ class ReductionOptimizer:
         return {"cagr_pct": cagr * 100, "max_dd_pct": max_dd * 100, "sharpe": sharpe, "calmar": calmar}
 
 # =============================================================================
-# MODULE 31 : COUCHE PÉDAGOGIQUE — traduction en langage clair pour débutants
+# MODULE 31 : COUCHE PÉDAGOGIQUE
 # =============================================================================
 RISK_ENGINE_GLOSSARY = """
 **Comment lire cette page si vous découvrez l'outil :**
@@ -3312,14 +3282,160 @@ RISK_ENGINE_GLOSSARY = """
   pas comme une preuve.
 """
 
-def render_glossary_expander():
-    with st.expander("📖 Je découvre l'outil — comment tout lire en 2 minutes", expanded=False):
-        st.markdown(RISK_ENGINE_GLOSSARY)
+BACKTEST_GLOSSARY = """
+**Ce que veulent dire les mots de cette section :**
+
+- **Walk-Forward** : une méthode de test honnête. Au lieu d'entraîner un modèle sur
+  TOUT l'historique puis de vérifier s'il "prédit" bien le passé (ce qui triche —
+  il a déjà vu la réponse), on avance dans le temps : le modèle apprend sur les
+  données jusqu'à une date, puis on vérifie sa prédiction sur les jours SUIVANTS,
+  qu'il n'a jamais vus. C'est la seule façon de savoir si un modèle marcherait
+  vraiment "en vrai".
+
+- **Ridge** : le nom d'une technique statistique (une régression) qui essaie de
+  prédire la performance future à partir d'indicateurs passés (tendance,
+  volatilité, écart au marché...). Le nom vient des mathématiques utilisées ;
+  ce n'est pas un ETF ni une entreprise.
+
+- **Baseline** : la comparaison la plus simple possible ("la moyenne historique
+  suffit-elle ?"). Si Ridge ne fait pas mieux que la Baseline, Ridge ne sert à rien.
+
+- **Hit Rate** : sur 100 prédictions, combien de fois le modèle a-t-il deviné la
+  bonne DIRECTION (hausse ou baisse), sans forcément deviner l'ampleur exacte ?
+  50% = un pile ou face. Au-dessus de 55-60%, ça commence à être intéressant.
+
+- **Corrélation (ici précisément)** : dans cette section, la corrélation mesure
+  si les PRÉDICTIONS du modèle et ce qui s'est RÉELLEMENT passé varient dans le
+  même sens. 0 = le modèle ne prédit rien d'utile. 1 = prédictions parfaites.
+  Une corrélation négative veut dire que le modèle se trompe plus souvent qu'il
+  n'a raison — c'est différent de la "corrélation entre deux ETF" que vous voyez
+  ailleurs dans l'app (qui mesure si deux placements montent/descendent ensemble).
+
+- **"Alpha attendu à 20 jours : +X%"** : la meilleure estimation du modèle pour
+  la SURPERFORMANCE (ou sous-performance) de cet ETF par rapport au marché
+  mondial dans environ un mois de bourse (20 jours ouvrés). Ce n'est PAS une
+  promesse — c'est une estimation statistique avec une marge d'erreur, affichée
+  uniquement quand le modèle a prouvé au-dessus qu'il fait mieux qu'une simple
+  moyenne (sinon l'app refuse de l'afficher, pour ne pas vous donner une fausse
+  impression de précision).
+"""
+
+RISK_ENGINE_MDD_GLOSSARY = """
+**"MDD médian : -3.05% · MDD P05 : -13.67%" — comment lire ça ?**
+
+MDD veut dire "Maximum Drawdown" = la pire chute subie entre un jour donné et
+les 20 jours de bourse suivants (environ un mois).
+
+- **MDD médian** : si on regarde tous les jours passés où le signal était au même
+  niveau qu'aujourd'hui, la baisse "typique" (celle du milieu du classement)
+  qui a suivi était de -3.05%. La moitié des cas ont fait pire, l'autre moitié mieux.
+
+- **MDD P05 (pire 5%)** : dans les 5% des pires cas historiques (le vrai
+  scénario catastrophe), la chute a atteint -13.67%. C'est votre "pire jour
+  possible" statistique — pas garanti de se reproduire, mais c'est déjà arrivé.
+
+- **P(MDD<-5%)** : sur 100 fois où ce signal est apparu par le passé, dans
+  combien de cas la baisse a-t-elle dépassé 5% ? Plus ce chiffre est élevé,
+  plus le signal actuel doit vous inquiéter.
+"""
+
+RSG_GLOSSARY = """
+**RSG brut vs RSG pondéré qualité — quelle différence ?**
+
+RSG = "Risk Stress Global" = un thermomètre unique qui résume le niveau de
+danger de TOUT votre portefeuille (pas juste un ETF), en combinant les 4 scores
+(Korea, Semiconductor, World, World Value) selon leur poids dans votre argent.
+
+- **RSG brut** : la moyenne pondérée simple des 4 scores.
+- **RSG pondéré qualité** : la même moyenne, mais où les scores construits sur
+  des données moins fiables (Korea, Semiconductor — voir "DQ" ci-dessous) comptent
+  un peu moins fort. Si les deux chiffres sont proches, c'est bon signe (les
+  scores fiables et les scores approximatifs racontent la même histoire). S'ils
+  divergent beaucoup, méfiez-vous du RSG brut.
+"""
+
+VALIDATION_SECTION_GLOSSARY = """
+**À quoi sert cette section "Validation historique" ?**
+
+Elle répond à une seule question, pour chaque niveau d'alerte (0, 1, 2 ou 3) :
+
+> "Si ce même signal s'était déclenché dans le passé, qu'est-ce qui s'est
+> RÉELLEMENT passé ensuite ?"
+
+Concrètement, l'app regarde tout l'historique disponible, retrouve tous les
+jours où le score était au même niveau qu'aujourd'hui, et calcule ce qui s'est
+passé dans les jours/semaines suivants (rendement, pire baisse). C'est la seule
+façon de savoir si un score "2/3" doit vraiment vous inquiéter, ou s'il
+s'agit d'un signal qui, historiquement, n'a jamais mené à grand-chose.
+
+**Comment l'utiliser** : avant de suivre une recommandation de réduction, allez
+voir ici combien de fois ce signal a réellement précédé une vraie baisse. Si le
+signal 2/3 n'a historiquement jamais entraîné de perte significative, la
+recommandation de réduire est moins convaincante.
+"""
+
+OPTIMIZATION_SECTION_GLOSSARY = """
+**À quoi sert la section "Optimisation de la réduction" ?**
+
+Le cahier des charges de l'app propose de réduire de 25% quand le score
+atteint 2/3, et de 50% au score 3/3. Mais ces chiffres (25%/50%) ont-ils été
+choisis parce qu'ils marchent vraiment, ou juste parce qu'ils semblaient
+raisonnables ?
+
+Cette section teste, sur le vrai historique, TOUS les niveaux de réduction
+possibles (0%, 10%, 15%... jusqu'à 50%) et regarde lequel aurait donné le
+meilleur résultat SI on l'avait appliqué à chaque fois que le signal
+s'est déclenché par le passé.
+
+**"Buy&Hold : CAGR 29.9% · MaxDD -33.2% · Calmar 0.90" — définitions :**
+- **CAGR** : le taux de croissance annuel moyen si vous n'aviez jamais rien
+  touché à votre position (juste acheté et gardé). 29.9%/an ici.
+- **MaxDD** : la pire chute jamais subie sur toute la période testée : -33.2%.
+- **Calmar** : un ratio "rendement / pire chute" (CAGR ÷ |MaxDD|). Plus il est
+  élevé, meilleur est le compromis performance/risque. 0.90 veut dire qu'il a
+  fallu accepter presque 1% de pire chute pour chaque 1% de rendement annuel.
+
+**Comment lire le tableau** : chaque ligne montre ce qui se serait passé avec
+un niveau de réduction donné. Si le "meilleur niveau" trouvé est différent de
+25%/50%, l'app vous le signale — ça ne veut pas dire que 25%/50% est faux,
+mais que rien ne le prouve encore sur cet historique précis.
+"""
+
+SLEEVE_GLOSSARY = """
+**Pourquoi l'app raisonne maintenant par "poche stratégique" et pas par ticker ?**
+
+L'optimiseur Markowitz (celui qui calcule "Max Sharpe") raisonne ligne par ligne :
+il voit 5 ETF indépendants. Il calcule que DCAM (PEA) et MWRD (AV) sont corrélés
+à ~1.00 — et pour lui, deux actifs corrélés à 1.00 sont redondants. Il va donc
+proposer de réduire l'un au profit de l'autre.
+
+C'est mathématiquement correct, mais faux pour vous, car il ignore une contrainte
+que vous ne pouvez pas contourner : **DCAM est dans votre PEA, MWRD est dans votre
+Assurance-Vie**. Ce sont deux enveloppes fiscales différentes, pas deux paris
+différents. Vous ne pouvez pas "arbitrer" entre les deux sans fermer une enveloppe.
+
+**La solution** : regrouper vos lignes en poches stratégiques, et juger chaque
+poche selon sa VRAIE raison d'être :
+
+- **Poche World Core** (DCAM + MWRD) = le socle. On regarde l'exposition TOTALE
+  (PEA + AV confondus), pas chaque ligne séparément.
+- **Poche World Value** (WMMS) = un pari actif sur le style Value. Sa taille
+  dépend de si le style fonctionne encore, pas d'un calcul de diversification.
+- **Poche Satellites** (Korea + CHIP) = paris concentrés. Leur volatilité est
+  un choix assumé, la seule vraie limite est le plafond combiné (35%).
+"""
+
+
+def render_glossary_expander(glossary: str = None, title: str = "📖 Je découvre l'outil — comment tout lire en 2 minutes", expanded: bool = False):
+    """Affiche un expander contenant le glossaire. Si aucun glossaire passé,
+    utilise le glossaire général de Risk Engine."""
+    if glossary is None:
+        glossary = RISK_ENGINE_GLOSSARY
+    with st.expander(title, expanded=expanded):
+        st.markdown(glossary)
 
 
 def pedagogic_verdict(key: str, confirmed_score: int, dq: float, reliable_history: bool) -> Dict:
-    """Traduit un score technique en verdict et consigne d'action en français simple,
-    sans jargon, pour quelqu'un qui n'a jamais utilisé l'outil."""
     names = {"korea": "vos actions coréennes (MSCI Korea)",
              "semi": "vos actions de semi-conducteurs",
              "world": "l'ensemble du marché mondial",
@@ -3367,7 +3483,6 @@ def pedagogic_verdict(key: str, confirmed_score: int, dq: float, reliable_histor
 
 
 def render_pedagogic_card(key: str, label: str, d: Dict, weight_pct: float):
-    """Carte pédagogique complète : verdict en clair + les 3 chiffres qui comptent + réserves."""
     v = pedagogic_verdict(key, d["confirmed_score"], d["dq"], d.get("enough_history", True))
     reduction = d["reduction_pct"]
     target_pct = weight_pct * (1 - reduction / 100)
@@ -3387,11 +3502,8 @@ def render_pedagogic_card(key: str, label: str, d: Dict, weight_pct: float):
 
 def build_consolidated_verdict(nom: str, decision_result: Dict, target_weight: Dict,
                                  risk_contribution_pct: Optional[float]) -> Dict:
-    """Fusionne DecisionEngine (macro/technique) + allocation cible (Markowitz) +
-    concentration du risque en UN SEUL verdict, sans qu'aucune section ne se
-    contredise silencieusement en haut vs en bas de page."""
     reasons = []
-    severity = 0  # 0=rien, 1=surveiller, 2=réduire, 3=réduire fort
+    severity = 0
 
     dec = decision_result.get("decision", "HOLD")
     if dec in ("EXIT", "REDUCE_50"):
@@ -3436,9 +3548,6 @@ def build_consolidated_verdict(nom: str, decision_result: Dict, target_weight: D
 
 def render_consolidated_recommendations(ui: "StreamlitUI", ptf: Dict, decisions: List[Dict],
                                           target_weights: Dict, rc_map: Dict):
-    """Remplace/complète le bandeau résumé : UNE recommandation par ETF, qui tient
-    compte de TOUT (risque macro, allocation, concentration) au lieu de trois avis
-    séparés qui peuvent se contredire visuellement."""
     st.markdown("## 🧭 Ce que vous devriez faire, en une phrase par ETF")
     st.caption("Cette section combine le signal de risque, l'écart à l'allocation optimale et la "
                "concentration du risque en une seule recommandation, pour éviter les messages "
@@ -3458,6 +3567,146 @@ def render_consolidated_recommendations(ui: "StreamlitUI", ptf: Dict, decisions:
             <b>{v["emoji"]} {v["nom"]} — {v["title"]}{amt_txt}</b><br>
             <span style="font-size:.88rem;color:#CBD5E1;">{v["reason_text"]}</span>
         </div>''', unsafe_allow_html=True)
+
+
+# =============================================================================
+# MODULE 32 : POCHES STRATÉGIQUES
+# =============================================================================
+STRATEGIC_SLEEVES = {
+    "world_core": {
+        "label": "🌍 Poche World (Core)",
+        "tickers": ["DCAM.PA", "MWRD.PA"],
+        "explain": ("Le socle de votre portefeuille. DCAM (PEA) et MWRD (Assurance-Vie) "
+                    "sont le MÊME pari — le marché mondial — logé dans deux enveloppes "
+                    "fiscales différentes pour des raisons fiscales, pas pour diversifier. "
+                    "L'optimiseur ne doit JAMAIS suggérer de réduire l'un au profit de "
+                    "l'autre : c'est une contrainte fiscale, pas un choix d'investissement."),
+    },
+    "world_value_tilt": {
+        "label": "💎 Poche World Value (surpondération)",
+        "tickers": ["WMMS.DE"],
+        "explain": ("Un pari actif : le style 'Value' (entreprises décotées) fait mieux "
+                    "que le marché mondial classique sur certaines périodes. Ce n'est "
+                    "PAS un doublon du World Core — c'est une surpondération délibérée "
+                    "d'un style. Sa taille doit dépendre de si ce pari continue de "
+                    "fonctionner, pas d'un calcul de diversification pure."),
+    },
+    "satellites_boost": {
+        "label": "🚀 Poche Satellites (booster de performance)",
+        "tickers": ["KRW.PA", "CHIP.PA"],
+        "explain": ("Des paris concentrés et volontairement volatils pour essayer de "
+                    "battre le World — pas des placements de fond de portefeuille. "
+                    "Leur volatilité élevée (Korea peut faire -9% en une séance, "
+                    "Semiconductors -6%) est un choix assumé, pas un défaut à corriger "
+                    "en les réduisant à 2%. La seule limite qui compte est le plafond "
+                    "combiné (35% max), pas leur poids individuel."),
+    },
+}
+
+def get_sleeve_of(ticker: str) -> Optional[str]:
+    for key, sleeve in STRATEGIC_SLEEVES.items():
+        if ticker in sleeve["tickers"]:
+            return key
+    return None
+
+
+class SleeveAnalysisEngine:
+    """Calcule l'exposition réelle par poche stratégique, indépendamment
+    des enveloppes fiscales, et donne un avis adapté à CHAQUE poche selon
+    sa nature — pas un avis uniforme de diversification pure."""
+
+    def __init__(self, dm: DataManager, qre: QuantRiskEngine):
+        self.dm = dm
+        self.qre = qre
+
+    def compute_sleeve_weights(self, ptf: Dict) -> Dict[str, Dict]:
+        vt = ptf["valeur_totale"]
+        result = {}
+        for key, sleeve in STRATEGIC_SLEEVES.items():
+            val = sum(p["valeur"] for p in ptf["positions"]
+                      if p.get("ticker") in sleeve["tickers"])
+            result[key] = {"label": sleeve["label"], "valeur": val,
+                            "pct": (val / vt * 100) if vt else 0,
+                            "tickers": sleeve["tickers"], "explain": sleeve["explain"]}
+        return result
+
+    def analyze_world_value_tilt(self) -> Dict:
+        """Le vrai dilemme : quel dosage World vs World Value ?
+        On répond avec un signal de MOMENTUM RELATIF, pas une intuition figée."""
+        world = get_world_series(self.dm)
+        wmms = self.dm.data.get("WMMS.DE", pd.DataFrame())
+        if world.empty or wmms.empty or "Close" not in wmms.columns:
+            return {"available": False}
+        close_v = wmms["Close"].dropna()
+        common = close_v.index.intersection(world.index)
+        if len(common) < 130:
+            return {"available": False}
+
+        def rel_perf(n):
+            if len(common) <= n: return None
+            cv, cw = close_v.loc[common], world.loc[common]
+            return ((cv.iloc[-1] / cv.iloc[-n-1]) - (cw.iloc[-1] / cw.iloc[-n-1])) * 100
+
+        gap_3m = rel_perf(63)
+        gap_6m = rel_perf(126)
+        gap_12m = rel_perf(252) if len(common) > 252 else None
+
+        accelerating = (gap_3m is not None and gap_6m is not None and gap_3m > gap_6m / 2)
+
+        if gap_3m is None:
+            verdict = "Données insuffisantes"
+        elif gap_3m > 2 and accelerating:
+            verdict = "Le pari Value continue de fonctionner et s'accélère — surpondération justifiée."
+        elif gap_3m > 0:
+            verdict = "Le pari Value fonctionne encore, mais ralentit — surveillez, n'augmentez pas."
+        elif gap_3m > -3:
+            verdict = "Le Value est à l'arrêt face au World — ni renforcer, ni réduire dans l'urgence."
+        else:
+            verdict = ("Le Value sous-performe nettement le World récemment — c'est le signal "
+                       "d'inversion que vous cherchiez. Envisagez de réduire la surpondération.")
+
+        return {"available": True, "gap_3m_pct": gap_3m, "gap_6m_pct": gap_6m,
+                "gap_12m_pct": gap_12m, "verdict": verdict}
+
+    def analyze_semiconductor_thesis(self) -> Dict:
+        """Ta thèse : Semiconductor a un retard NON JUSTIFIÉ vs Korea,
+        car les deux dépendent des semi-conducteurs (Korea via Samsung/SK Hynix)."""
+        krw = self.dm.data.get("KRW.PA", pd.DataFrame())
+        chip = self.dm.data.get("CHIP.PA", pd.DataFrame())
+        if krw.empty or chip.empty:
+            return {"available": False}
+        ck, cc = krw["Close"].dropna(), chip["Close"].dropna()
+        common = ck.index.intersection(cc.index)
+        if len(common) < 130:
+            return {"available": False}
+
+        def rel_perf(n):
+            if len(common) <= n: return None
+            k, c = ck.loc[common], cc.loc[common]
+            return ((c.iloc[-1] / c.iloc[-n-1]) - (k.iloc[-1] / k.iloc[-n-1])) * 100
+
+        gap_1m = rel_perf(21)
+        gap_3m = rel_perf(63)
+        gap_6m = rel_perf(126)
+
+        closing_gap = (gap_1m is not None and gap_3m is not None and gap_1m > 0 and gap_1m > gap_3m / 3)
+
+        if gap_3m is None:
+            verdict = "Données insuffisantes pour juger le retard."
+        elif gap_1m is not None and gap_1m > 2 and closing_gap:
+            verdict = ("✅ Votre thèse se confirme : Semiconductor commence à rattraper Korea sur "
+                       "le mois écoulé après un retard sur 3-6 mois. Le pari haussier gagne en crédibilité.")
+        elif gap_3m < -5 and (gap_1m is None or gap_1m < 0):
+            verdict = ("⚠️ Le retard de Semiconductor vs Korea s'élargit encore, sans signe de "
+                       "rattrapage récent. Rien ne confirme votre thèse pour l'instant — "
+                       "ce n'est pas encore invalidé, mais la preuve n'est pas là non plus.")
+        else:
+            verdict = ("🔵 Situation neutre : ni confirmation, ni infirmation claire du rattrapage "
+                       "attendu. Réexaminez dans quelques semaines.")
+
+        return {"available": True, "gap_1m_pct": gap_1m, "gap_3m_pct": gap_3m,
+                "gap_6m_pct": gap_6m, "closing_gap": closing_gap, "verdict": verdict}
+
 
 # -----------------------------------------------------------------------------
 # MODULE 16 : STREAMLIT UI
@@ -3488,13 +3737,14 @@ class StreamlitUI:
         self.lee = LinxeaExecutionEngine(dm, self.analog)
         self.dqe = DataQualityEngine()
         self.dec_engine = DecisionEngine()
+        self.sae = SleeveAnalysisEngine(dm, qre)
 
     @staticmethod
     def _sign(v: float) -> str:
         return "+" if v >= 0 else ""
 
     def render_sidebar(self) -> Tuple[bool, List[Dict], float, float, float]:
-        st.sidebar.markdown("## ⚙ Paramètres v7.2")
+        st.sidebar.markdown("## ⚙ Paramètres v7.3")
         mode_direct = st.sidebar.toggle("🔌 Mode Direct (Vue Brute)", value=False)
         st.sidebar.markdown("---")
         cap = st.sidebar.number_input("Capital investi (€)", value=st.session_state["cfg_capital_reel"], step=100.0, format="%.2f", key="input_capital_reel")
@@ -3598,7 +3848,7 @@ class StreamlitUI:
         st.markdown('<div style="display:flex;align-items:baseline;gap:1rem;margin-bottom:.2rem;">'
                     '<span style="font-family:Space Mono;font-size:1.6rem;font-weight:700;color:#D4AF37;">◈</span>'
                     '<span style="font-size:1.5rem;font-weight:700;color:#E2E8F0;">COCKPIT DÉCISIONNEL</span>'
-                    '<span style="font-family:Space Mono;font-size:.9rem;color:#6B7585;">v7.2 · RISK ENGINE SPÉCIALISÉ</span></div>', unsafe_allow_html=True)
+                    '<span style="font-family:Space Mono;font-size:.9rem;color:#6B7585;">v7.3 · RISK ENGINE SPÉCIALISÉ + POCHES</span></div>', unsafe_allow_html=True)
         c1, c2 = st.columns([3, 1])
         with c1:
             st.caption(f"Prix live · {now.strftime('%d/%m/%Y %H:%M:%S')} (Paris) · Cache 30s/90s")
@@ -3849,11 +4099,24 @@ class StreamlitUI:
 
     def render_optimal_allocation_section(self, ptf: Dict):
         st.markdown("## 🧮 Répartition Optimale (Markowitz / Risk Parity / RC-contraint)")
+        st.markdown(SLEEVE_GLOSSARY)
         held = [(p["ticker"], p["nom"]) for p in ptf["positions"] if p.get("ticker") and p["valeur"] > 0]
         tickers = [t for t, _ in held]
         if len(tickers) < 2:
             st.info("Au moins 2 positions sont nécessaires pour optimiser.")
             return
+
+        # v7.3 : avertissement sur la contrainte fiscale DCAM / MWRD
+        corr_check = self.qre.correlation_matrix(["DCAM.PA", "MWRD.PA"], 60)
+        if corr_check is not None and "DCAM.PA" in corr_check.columns and "MWRD.PA" in corr_check.columns:
+            corr_val = corr_check.loc["DCAM.PA", "MWRD.PA"]
+            if pd.notna(corr_val) and corr_val > 0.95:
+                st.warning("⚠️ DCAM.PA (PEA) et MWRD.PA (AV) sont corrélés à "
+                           f"{corr_val:.2f} — ce sont le même pari World dans deux enveloppes "
+                           "fiscales différentes. Les suggestions de réduction/renforcement individuelles "
+                           "ci-dessous ne tiennent pas compte de cette contrainte fiscale — ignorez-les pour "
+                           "ces deux lignes et référez-vous à la section 'Vue par poche stratégique' plus bas.")
+
         yf_to_id, yf_tickers = {}, []
         for tk_id in tickers:
             meta = ETF_LIBRARY.get(tk_id, {})
@@ -3948,6 +4211,57 @@ class StreamlitUI:
         st.caption(f"{wf_sharpe.get('n_rebalances', 0)} rebalancements simulés · coûts de transaction inclus "
                    "(10 bps par mouvement) · aucun poids n'a été calculé avec des données postérieures à la date "
                    "où il a été appliqué.")
+
+    # =========================================================================
+    # MODULE 32bis : RENDU — VUE PAR POCHE STRATÉGIQUE
+    # =========================================================================
+    def render_sleeve_analysis(self, ptf: Dict):
+        st.markdown("## 🧭 Vue par poche stratégique (et non par ticker isolé)")
+        st.markdown('<div class="pedagogy-box">'
+                    "L'optimiseur ci-dessus (Markowitz) raisonne ligne par ligne et ne sait pas que "
+                    "DCAM (PEA) et MWRD (AV) sont le MÊME pari World dans deux enveloppes fiscales. "
+                    "Cette section corrige ce point : elle regarde vos vrais choix stratégiques."
+                    "</div>", unsafe_allow_html=True)
+
+        sleeves = self.sae.compute_sleeve_weights(ptf)
+
+        cols = st.columns(3)
+        for i, (key, s) in enumerate(sleeves.items()):
+            with cols[i]:
+                st.markdown(f'''<div class="card">
+                    <div class="kpi-label">{s["label"]}</div>
+                    <div class="kpi-value">{s["pct"]:.1f}%</div>
+                    <div class="small" style="margin-top:.5rem;">{s["explain"]}</div>
+                </div>''', unsafe_allow_html=True)
+
+        world_total = sleeves["world_core"]["pct"]
+        st.info(f"📌 Votre exposition World totale (PEA + AV confondus) est de **{world_total:.1f}%** — "
+                "c'est ce chiffre qui compte pour juger si vous êtes trop/pas assez exposé au marché "
+                "mondial, pas les deux lignes séparément.")
+
+        st.markdown("### 💎 Dilemme World vs World Value — que dit le momentum ?")
+        val_analysis = self.sae.analyze_world_value_tilt()
+        if val_analysis.get("available"):
+            g3, g6 = val_analysis["gap_3m_pct"], val_analysis["gap_6m_pct"]
+            st.markdown(f'''<div class="card card-gold">
+                <b>Écart Value vs World :</b> 3 mois : {g3:+.1f}% · 6 mois : {g6:+.1f}%<br>
+                <div style="margin-top:.5rem;padding:.6rem;background:rgba(212,175,55,.1);border-radius:8px;">
+                💡 {val_analysis["verdict"]}
+                </div></div>''', unsafe_allow_html=True)
+        else:
+            st.info("Historique insuffisant pour juger la tendance Value vs World.")
+
+        st.markdown("### 🔬 Votre thèse Semiconductor — rattrapage vs Korea ?")
+        chip_analysis = self.sae.analyze_semiconductor_thesis()
+        if chip_analysis.get("available"):
+            g1, g3 = chip_analysis["gap_1m_pct"], chip_analysis["gap_3m_pct"]
+            st.markdown(f'''<div class="card card-purple">
+                <b>Écart Semiconductor vs Korea :</b> 1 mois : {g1:+.1f}% · 3 mois : {g3:+.1f}%<br>
+                <div style="margin-top:.5rem;padding:.6rem;background:rgba(168,85,247,.1);border-radius:8px;">
+                💡 {chip_analysis["verdict"]}
+                </div></div>''', unsafe_allow_html=True)
+        else:
+            st.info("Historique insuffisant pour juger le rattrapage.")
 
     def render_equity_curve_section(self, ptf: Dict, regime: Dict, positions_conf: List[Dict]):
         st.markdown("## 📈 Historique de votre capital")
@@ -4076,6 +4390,8 @@ class StreamlitUI:
                             f'<div class="pedago-metric-explain">{dd_t["explain"][:80]}...</div></div>', unsafe_allow_html=True)
                 st.markdown('</div>', unsafe_allow_html=True)
         with st.expander("🔬 Analyse experte : Corrélation & Contribution au risque", expanded=False):
+            st.caption("**Corrélation entre vos ETF entre eux** (60 jours) — différente de la corrélation du "
+                       "Backtest, qui mesure la fiabilité d'une prédiction.")
             col_corr, col_rc = st.columns(2)
             tickers_ptf = [pos["ticker"] for pos in ptf["positions"] if pos.get("ticker") and pos["valeur"] > 0]
             positions_map = {p["nom"]: p for p in ptf["positions"]}
@@ -4337,6 +4653,7 @@ class StreamlitUI:
 
     def render_backtest_calibration_tab(self, ptf: Dict):
         st.markdown("## 🧪 Backtest & Calibration (Priorité 3)")
+        st.markdown(BACKTEST_GLOSSARY)
         st.caption("Walk-forward, comparaison de stratégies, calibration des seuils hors-échantillon. "
                    "Aucun résultat ici ne doit être pris comme une garantie.")
         if not SKLEARN_OK:
@@ -4351,7 +4668,6 @@ class StreamlitUI:
             st.markdown(f"---\n## 📌 {nom} (`{ticker}`)")
             self._render_single_backtest(ticker)
 
-    # --- PATCH 4 : _render_single_backtest — pas de prédiction si Ridge invalidé ---
     def _render_single_backtest(self, ticker: str):
         with st.spinner(f"Construction des features pour {ticker}..."):
             feat = build_feature_frame(self.dm, ticker)
@@ -4578,8 +4894,12 @@ class StreamlitUI:
                     scores.append({"Ticker": ticker, "Nom": meta.get("nom", ""), "Catégorie": meta.get("category", ""),
                                    "Thème": meta.get("theme", ""), "Score": "N/A", "Momentum 6M": "N/A",
                                    "Force Relative": "N/A", "Volatilité": "N/A", "Sharpe": "N/A",
-                                   "Drawdown": "N/A", "Corr 1M": "N/A", "Corr 3M": "N/A",
-                                   "Corr 6M": "N/A", "Corr 1Y": "N/A", "Statut": "⚠ Données indisponibles"})
+                                   "Drawdown": "N/A",
+                                   "Corrélation avec le World (1M)": "N/A",
+                                   "Corrélation avec le World (3M)": "N/A",
+                                   "Corrélation avec le World (6M)": "N/A",
+                                   "Corrélation avec le World (1A)": "N/A",
+                                   "Statut": "⚠ Données indisponibles"})
                 else:
                     m = res["metrics"]
                     scores.append({"Ticker": ticker, "Nom": meta.get("nom", ""), "Catégorie": meta.get("category", ""),
@@ -4589,10 +4909,10 @@ class StreamlitUI:
                                    "Volatilité": f"{m.get('volatility', 0):.1f}%",
                                    "Sharpe": f"{m.get('sharpe', 0):.2f}",
                                    "Drawdown": f"{m.get('max_drawdown_1y', 0):.1f}%",
-                                   "Corr 1M": f"{m.get('corr_1m', 0):.2f}" if m.get('corr_1m') is not None else "N/A",
-                                   "Corr 3M": f"{m.get('corr_3m', 0):.2f}" if m.get('corr_3m') is not None else "N/A",
-                                   "Corr 6M": f"{m.get('corr_6m', 0):.2f}" if m.get('corr_6m') is not None else "N/A",
-                                   "Corr 1Y": f"{m.get('corr_1y', 0):.2f}" if m.get('corr_1y') is not None else "N/A",
+                                   "Corrélation avec le World (1M)": f"{m.get('corr_1m', 0):.2f}" if m.get('corr_1m') is not None else "N/A",
+                                   "Corrélation avec le World (3M)": f"{m.get('corr_3m', 0):.2f}" if m.get('corr_3m') is not None else "N/A",
+                                   "Corrélation avec le World (6M)": f"{m.get('corr_6m', 0):.2f}" if m.get('corr_6m') is not None else "N/A",
+                                   "Corrélation avec le World (1A)": f"{m.get('corr_1y', 0):.2f}" if m.get('corr_1y') is not None else "N/A",
                                    "Statut": "✅ Analysé"})
             df_scores = pd.DataFrame(scores)
             df_scores["Score_num"] = pd.to_numeric(df_scores["Score"], errors="coerce")
@@ -4652,11 +4972,11 @@ class StreamlitUI:
             st.markdown('<div class="arb-neutral">✅ Aucune opportunité d\'arbitrage significative détectée.</div>', unsafe_allow_html=True)
 
     # =========================================================================
-    # RISK ENGINE v7.1 — 3 vues : Scores en direct / Validation / Optimisation
+    # RISK ENGINE v7.1 — 3 vues
     # =========================================================================
     def render_risk_engine_v71(self, ptf: Dict):
-        # PATCH 5 : glossaire en toute première ligne
-        render_glossary_expander()
+        # Glossaires en tête de section
+        render_glossary_expander(RSG_GLOSSARY, title="📖 RSG brut vs RSG pondéré qualité — quelle différence ?")
         st.markdown("## 🛡 Risk Engine v7.1 — Scores en direct")
         st.caption("Chaque score est confirmé par une persistance spécifique à sa fréquence "
                    "(technique quotidien 3/5j, VIX 3/3j consécutives, crédit ~2 semaines).")
@@ -4690,10 +5010,8 @@ class StreamlitUI:
             score_color = {0: "#22C55E", 1: "#3B82F6", 2: "#F97316", 3: "#FF3131"}[d["confirmed_score"]]
             weight_pct = w_map.get(key, 0) * 100
 
-            # PATCH 5 : carte pédagogique en langage clair AVANT le bloc technique
             render_pedagogic_card(key, labels[key], d, weight_pct)
 
-            # Bloc technique (replié dans un expander pour ceux qui veulent creuser)
             with st.expander(f"🔬 Voir le détail technique — {labels[key]}"):
                 reduction = d["reduction_pct"]
                 target_pct = weight_pct * (1 - reduction / 100)
@@ -4729,9 +5047,10 @@ class StreamlitUI:
                 </div>''', unsafe_allow_html=True)
                 st.json(d["details"])
 
-    # PATCH 2 : avertissement de fiabilité dans validation
     def render_risk_v71_validation(self):
         st.markdown("## 🧪 Validation historique complète")
+        st.markdown(VALIDATION_SECTION_GLOSSARY)
+        st.markdown(RISK_ENGINE_MDD_GLOSSARY)
         st.caption("Distribution complète (moyenne/médiane/quantiles/probabilités) des rendements "
                    "et drawdowns futurs, conditionnés par le score confirmé.")
         backtester = RiskEngineV71Backtester(self.dm)
@@ -4758,19 +5077,22 @@ class StreamlitUI:
         st.markdown('<div class="pedagogy-box"><b>Limitations données gratuites :</b><br>'
                     '• Korea : proxy vol KRW/USD + commandes manufacturières US (AMTMNO) → DQ = 45%.<br>'
                     '• Semiconductor : breadth sur 20 valeurs proxy, pas la composition SOX officielle → DQ = 80%.<br>'
-                    '• Historique limité à ~6 ans (HISTORICAL_DAYS=1500).</div>', unsafe_allow_html=True)
+                    '• Historique porté à 10 ans (HISTORICAL_DAYS=3650) : bénéficie surtout à World et World Value. '
+                    'Korea et Semiconductor restent limités par la date de création de leurs ETF (~2019).</div>', unsafe_allow_html=True)
 
-    # PATCH 3 : affichage avec seuil minimal d'échantillon
     def render_risk_v71_optimizer(self, ptf: Dict):
         st.markdown("## 🎯 Optimisation de la réduction — 25%/50% sont-ils justifiés ?")
-        st.caption("Teste chaque niveau de réduction contre l'historique réel et sélectionne "
-                   "le meilleur par ratio de Calmar (rendement / drawdown).")
+        st.markdown(OPTIMIZATION_SECTION_GLOSSARY)
+        trigger = st.select_slider("Tester le déclenchement à partir du score :",
+                                    options=[1, 2, 3], value=2,
+                                    help="Un score plus bas se déclenche plus souvent → plus de données, "
+                                         "mais un signal moins fort.")
         optimizer = ReductionOptimizer(self.dm)
         labels = {"korea": "🇰🇷 Korea", "semi": "💻 Semiconductor", "world": "🌍 World", "value": "💎 World Value"}
         for key, label in labels.items():
-            st.markdown(f"### {label} — déclenché à SR≥2")
+            st.markdown(f"### {label} — déclenché à SR≥{trigger}")
             with st.spinner(f"Grid search — {label}..."):
-                res = optimizer.run_for_engine(key, trigger_score=2)
+                res = optimizer.run_for_engine(key, trigger_score=trigger)
             if not res.get("available"):
                 st.warning(res.get("reason", "Indisponible"))
                 continue
@@ -4779,19 +5101,15 @@ class StreamlitUI:
             st.caption(f"Buy&Hold : CAGR {bh['cagr_pct']:.1f}% · MaxDD {bh['max_dd_pct']:.1f}% · "
                        f"Calmar {bh['calmar']:.2f}")
             best = res["best_reduction_by_calmar"]
-            current = "25%"
             if not res["reliable"]:
                 st.error(f"🔴 Seulement **{res['n_signal_days']} jours** où ce signal était actif sur "
                          f"{res['n_days']} jours d'historique total. Ce n'est PAS assez pour tirer une "
                          "conclusion fiable — le tableau ci-dessus reflète surtout le hasard de "
                          "l'échantillon. Ne modifie pas ta stratégie sur cette base.")
-            elif best != current:
-                st.warning(f"⚠ Meilleur niveau historique par Calmar : **{best}** "
-                           f"(différent de la valeur actuellement codée en dur : {current}) — "
-                           f"basé sur {res['n_signal_days']} jours de signal, échantillon jugé suffisant.")
             else:
-                st.success(f"✅ Le niveau actuellement codé ({current}) est aussi le meilleur historiquement "
-                           f"({res['n_signal_days']} jours de signal analysés).")
+                st.success(f"✅ {res['n_signal_days']} jours de signal — échantillon jugé suffisant. "
+                           f"Meilleur niveau historique : **{best}** "
+                           f"(valeur actuellement codée en dur : 25%).")
 
     def render_footer(self, mode_direct: bool, capital: float, score_em: int, regime_label: str, live_ok: int, live_total: int):
         st.markdown("---")
@@ -4800,7 +5118,7 @@ class StreamlitUI:
             s = self._sign
             mode_txt = "🔌 MODE DIRECT" if mode_direct else "Ajust. patrimonial actif"
             persist = "GitHub Gist + SQLite" if self.pm.status == "github" else "SQLite local (tempdir)"
-            st.caption(f"◈ Cockpit v7.2 · Risk Engine v7.1 intégré · {mode_txt} · "
+            st.caption(f"◈ Cockpit v7.3 · Risk Engine v7.1 + Poches stratégiques · {mode_txt} · "
                        f"Régime : {regime_label} · Capital {capital:,.2f}€ · Persistance : {persist} · {live_ok}/{live_total} prix live · "
                        f"Benchmark : MWR Cash-Flow Adjusted · Outil personnel --- Ne constitue pas un conseil en investissement")
         with col_f2:
@@ -4871,8 +5189,8 @@ def _cached_long_term_table(_dm: DataManager, cache_key: str) -> pd.DataFrame:
                      "Force Relative vs World": f"<span style='color:{rel_col};'>{rel_str2}</span>",
                      "Volatilité (%)": f"<span style='color:{vol_col};'>{vol_str}</span>",
                      "Sharpe": f"<span style='color:{sharpe_col};'>{sharpe_str}</span>",
-                     "Corrélation 1M": f"<span style='color:{corr1m_col};'>{corr1m_str}</span>",
-                     "Corrélation 3M": f"<span style='color:{corr3m_col};'>{corr3m_str}</span>",
+                     "Corrélation avec le World (1M)": f"<span style='color:{corr1m_col};'>{corr1m_str}</span>",
+                     "Corrélation avec le World (3M)": f"<span style='color:{corr3m_col};'>{corr3m_str}</span>",
                      "Gap 3 sem. vs World": f"<span style='color:{gap_color};'>{gap_str}</span>"})
     return pd.DataFrame(data)
 
@@ -4940,7 +5258,7 @@ def plot_correlation_heatmap(corr_df: pd.DataFrame) -> go.Figure:
         showscale=True,
         colorbar=dict(tickfont=dict(color="#CBD5E1", size=9), thickness=12, len=0.8, bgcolor="rgba(0,0,0,0)")))
     fig.update_layout(**_PLOTLY_BASE,
-        title=dict(text="<b>Corrélation Pearson (60j)</b>", font=dict(size=12, color="#6B7585")),
+        title=dict(text="<b>Corrélation Pearson (60j) entre vos ETF</b>", font=dict(size=12, color="#6B7585")),
         margin=dict(t=40, b=10, l=60, r=20), height=220)
     return fig
 
@@ -5171,7 +5489,6 @@ def main():
     with tab_dashboard:
         ui.render_header(mode_direct, live_ok, live_total)
         render_decision_summary_banner(decisions)
-        # PATCH 6 : recommandation consolidée unique
         rc_map = {}
         try:
             tk_held = [p["ticker"] for p in ptf["positions"] if p.get("ticker") and p["valeur"] > 0]
@@ -5196,6 +5513,8 @@ def main():
         ui.render_portfolio_leadership_comparison(ptf)
         ui.render_equity_curve_section(ptf, regime, positions_conf)
         ui.render_optimal_allocation_section(ptf)
+        # v7.3 : vue par poche stratégique juste après l'optimiseur
+        ui.render_sleeve_analysis(ptf)
         ui.render_risk_dashboard(ptf)
         st.markdown("## 🧠 Analyse des ETF Satellites")
 
