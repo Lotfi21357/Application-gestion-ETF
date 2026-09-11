@@ -1,16 +1,13 @@
 # =============================================================================
-# COCKPIT DÉCISIONNEL BOURSIER v7.1 — DATA ENGINE FIABLE + ALERTE QUANT V2
-#                  + BACKTEST + OPTIMISATION MARKOWITZ / RISK PARITY + CONTRAINTE RC
+# COCKPIT DÉCISIONNEL BOURSIER v7.2 — RISK ENGINE SPÉCIALISÉ PAR ETF
 # =============================================================================
-# v7.1 : Ajouts
-#   • Camembert + tableau répartition actuelle vs optimale
-#   • Bandeau résumé des décisions en tête d'app (calcul unique, découplé de l'affichage)
-#   • Backtest & Calibration : boucle sur les 5 ETF, imprimable (page-break)
-#   • Contrainte de Risk Contribution max dans l'optimiseur (sharpe_rc)
-#   • relative_strength_slope réellement implémentée
-#   • Cache analyze_ticker + cache table long terme
-#   • Suppression QuantAlertEngine (code mort)
-#   • compute_target_weight réutilise unified_score précalculé
+# v7.2 : Ajouts
+#   • MODULE 28 : ETF Specialized Risk Engine (Korea, Semi, World, World Value)
+#   • MODULE 29 : Validation historique (SR vs rendements futurs corrigée)
+#   • MODULE 30 : Optimisation de la réduction (25%/50% validés empiriquement)
+#   • Onglet dédié "🛡 Risk Engine v7.1" avec 3 sous-onglets
+#   • Corrections senior : forward_min exclusif, stats complètes, DQ, persistance
+#     par fréquence, unités explicites (bps, %), RSG brut ET pondéré qualité
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -31,6 +28,8 @@ from scipy import stats
 from scipy.optimize import minimize
 import ta
 import time
+import io as _io
+import requests as _requests
 
 warnings.filterwarnings("ignore")
 
@@ -48,14 +47,14 @@ except ImportError:
     SKLEARN_OK = False
 
 st.set_page_config(
-    page_title="Cockpit v7.1 · Data Engine Fiable + Optimisation",
+    page_title="Cockpit v7.2 · Risk Engine Spécialisé",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # -----------------------------------------------------------------------------
-# MODULE 1 : CSS (avec @media print pour export PDF)
+# MODULE 1 : CSS
 # -----------------------------------------------------------------------------
 st.markdown("""
 <style>
@@ -122,6 +121,13 @@ UNDERPERF_THRESHOLDS = {"alpha20": -0.03, "alpha60": -0.02}
 
 DECISION_EXIT_SCORE = 5
 DECISION_REENTER_SCORE = 2
+
+# --- AJOUT v7.2 : proxy SOX pour le Risk Engine v7.1 ---
+SOX_COMPONENTS_PROXY = [
+    "NVDA", "AVGO", "AMD", "TSM", "QCOM", "TXN", "INTC", "MU", "ADI",
+    "LRCX", "KLAC", "AMAT", "MRVL", "NXPI", "MCHP", "ON", "SWKS", "QRVO",
+    "ASML", "STM"
+]
 
 ETF_UNIVERSE = {
     "CG1G.DE": {"isin": "FR0010655712", "name": "Amundi ETF DAX UCITS ETF DR", "category": "Germany"},
@@ -406,7 +412,7 @@ _PORTFOLIO_JSON = os.path.join(tempfile.gettempdir(), "portfolio_positions.json"
 _TRANSACTIONS_JSON = os.path.join(tempfile.gettempdir(), "transactions.json")
 
 # -----------------------------------------------------------------------------
-# MODULE 3 : DATA MANAGER (avec cache analyze_ticker + relative_strength_slope réel)
+# MODULE 3 : DATA MANAGER
 # -----------------------------------------------------------------------------
 requests_cache.install_cache('yfinance_cache', expire_after=86400)
 
@@ -523,6 +529,9 @@ def _collect_all_yf_tickers() -> List[str]:
     tickers.extend(PROXIES_CHIP)
     tickers.extend(["NVDA", "AAPL", "GOOGL", "GOOG", "MSFT", "AMZN"])
     for tlist in SENTINELLES.values(): tickers.extend(tlist)
+    # --- AJOUT v7.2 : tickers Risk Engine ---
+    tickers.extend(["^VIX3M", "KRW=X"])
+    tickers.extend(SOX_COMPONENTS_PROXY)
     return list(dict.fromkeys(tickers))
 
 class DataManager:
@@ -530,7 +539,7 @@ class DataManager:
         self.live = _cached_live_prices()
         self.data = _cached_historical_data()
         self._log_returns_cache = None
-        self._analyze_cache = {}   # point (e) : cache analyze_ticker
+        self._analyze_cache = {}
 
     def get_price_info(self, tickers: List[str]) -> Tuple[Optional[float], Optional[float], Optional[str]]:
         for tk in tickers:
@@ -561,7 +570,6 @@ class DataManager:
     def adx(self, df: pd.DataFrame, period: int = 14) -> Optional[float]:
         return None
 
-    # === point (e) : cache analyze_ticker ===
     def analyze_ticker(self, ticker: str) -> Optional[Dict]:
         if ticker in self._analyze_cache:
             return self._analyze_cache[ticker]
@@ -590,23 +598,17 @@ class DataManager:
                 "sma200": self.sma(close, 200), "rsi": self.rsi(close), "adx": None,
                 "ath30": float(close.rolling(30, min_periods=1).max().iloc[-1])}
 
-    # === point (b) : implémentation réelle de la pente de force relative ===
     def relative_strength_slope(self, ticker: str, days: int = 14) -> Optional[float]:
-        """Pente de régression linéaire de (close / world) sur les `days` derniers jours.
-        Une pente > 0 signifie que la force relative progresse (ETF surperforme progressivement)."""
         df = self.data.get(ticker)
         if df is None or df.empty or "Close" not in df.columns:
             return None
         world = get_world_series(self, exclude_ticker=ticker)
-        if world.empty:
-            return None
+        if world.empty: return None
         close = df["Close"].dropna()
         common = close.index.intersection(world.index)
-        if len(common) < days + 5:
-            return None
+        if len(common) < days + 5: return None
         rs = (close.loc[common] / world.loc[common]).iloc[-days:]
-        if len(rs) < days:
-            return None
+        if len(rs) < days: return None
         x = np.arange(len(rs))
         try:
             slope, _ = np.polyfit(x, rs.values, 1)
@@ -1230,14 +1232,9 @@ class QuantRiskEngine:
         return float(np.sqrt(w @ cov @ w))
 
 # -----------------------------------------------------------------------------
-# MODULE 9bis : PORTFOLIO OPTIMIZER ENGINE (avec contrainte de Risk Contribution)
+# MODULE 9bis : PORTFOLIO OPTIMIZER ENGINE (avec contrainte RC)
 # -----------------------------------------------------------------------------
 class PortfolioOptimizerEngine:
-    """
-    Optimiseur de poids (SLSQP sous contraintes de bornes + contrainte RC max).
-    Méthodes : max_sharpe, sharpe_rc (Sharpe contraint RC), min_variance, risk_parity.
-    Inclut un walk-forward backtest sans biais in-sample.
-    """
     def __init__(self, dm: DataManager):
         self.dm = dm
         self._log_returns = dm.compute_log_returns()
@@ -1250,7 +1247,6 @@ class PortfolioOptimizerEngine:
         return df.dropna()
 
     def _risk_contributions(self, w: np.ndarray, cov: np.ndarray) -> np.ndarray:
-        """RC_i en fraction du risque total du portefeuille (somme = 1.0)."""
         port_var = w @ cov @ w
         if port_var <= 1e-12: return np.zeros_like(w)
         mrc = cov @ w
@@ -1271,31 +1267,20 @@ class PortfolioOptimizerEngine:
 
     def max_sharpe_weights_rc_constrained(self, tickers, window=252, risk_free=0.025,
                                             bounds=(0.02, 0.40), rc_max=0.30) -> Optional[Dict[str, float]]:
-        """Comme max_sharpe, mais avec contrainte RC_i <= rc_max (contribution au risque
-        du portefeuille, pas au capital). Empêche mécaniquement qu'une ligne très volatile
-        (ex. Korea ~50% vol) domine le risque du portefeuille même à poids modéré."""
         rets = self._returns_matrix(tickers, window)
         if rets is None or len(rets) < 60: return None
         mu = rets.mean().values * 252; cov = rets.cov().values * 252; n = len(mu)
-
         def neg_sharpe(w):
             vol = np.sqrt(w @ cov @ w)
             return 1e6 if vol <= 1e-9 else -((w @ mu) - risk_free) / vol
-
         cons = [{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}]
         for i in range(n):
             cons.append({"type": "ineq",
                          "fun": (lambda w, idx=i: rc_max - self._risk_contributions(w, cov)[idx])})
-
-        # Point de départ = risk parity (déjà RC-équilibré), plus stable que 1/n
         x0 = self._solve_weights(mu, cov, "rp", bounds)
         if x0 is None: x0 = np.full(n, 1 / n)
-
         res = minimize(neg_sharpe, x0, method="SLSQP", bounds=[bounds] * n,
                         constraints=cons, options={"maxiter": 500, "ftol": 1e-9})
-
-        # Fallback : si la contrainte RC rend le problème infaisable (rare), on relâche
-        # rc_max progressivement plutôt que d'échouer silencieusement.
         if not res.success:
             for relaxed in (rc_max + 0.05, rc_max + 0.10, rc_max + 0.15):
                 cons_rel = [{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}]
@@ -1305,7 +1290,6 @@ class PortfolioOptimizerEngine:
                 res = minimize(neg_sharpe, x0, method="SLSQP", bounds=[bounds] * n,
                                 constraints=cons_rel, options={"maxiter": 500, "ftol": 1e-9})
                 if res.success: break
-
         if not res.success: return None
         return {tk: float(w) for tk, w in zip(rets.columns, res.x)}
 
@@ -1332,7 +1316,6 @@ class PortfolioOptimizerEngine:
         return {tk: float(w) for tk, w in zip(rets.columns, res.x)} if res.success else None
 
     def _solve_weights(self, mu, cov, method, bounds, rc_max=0.30):
-        """Résout le problème d'optimisation pour `method` in {sharpe, sharpe_rc, minvar, rp}."""
         n = len(mu)
         cons = [{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}]
         if method == "minvar":
@@ -1350,7 +1333,7 @@ class PortfolioOptimizerEngine:
             for i in range(n):
                 cons.append({"type": "ineq",
                              "fun": (lambda w, idx=i: rc_max - self._risk_contributions(w, cov)[idx])})
-        else:  # sharpe libre
+        else:
             def obj(w):
                 vol = np.sqrt(w @ cov @ w)
                 return 1e6 if vol <= 1e-9 else -((w @ mu) - 0.025) / vol
@@ -1363,8 +1346,6 @@ class PortfolioOptimizerEngine:
                                lookback: int = 252, rebalance_every: int = 20,
                                bounds: Tuple[float, float] = (0.02, 0.40),
                                transaction_cost_bps: float = 0.0010, rc_max: float = 0.30) -> Dict:
-        """Recalcule les poids optimaux tous les `rebalance_every` jours en
-        n'utilisant QUE les `lookback` jours précédents (aucune fuite de données)."""
         series = {t: self._log_returns[t] for t in tickers if t in self._log_returns}
         if len(series) < 2:
             return {"available": False, "reason": "Moins de 2 tickers avec historique."}
@@ -1558,7 +1539,6 @@ class PortfolioEngine:
         elif pv < 0.20: return 0.75
         else: return 0.60
 
-    # === point (a) : réutiliser unified_precomputed + point (g) : sharpe_rc en priorité ===
     def compute_target_weight(self, nom: str, ticker: str, valeur_totale: float,
                                 positions_calc: List[Dict], unified_precomputed: Optional[Dict] = None) -> Dict:
         regime = self.re.get_full_regime()
@@ -1566,14 +1546,10 @@ class PortfolioEngine:
         strat4c = self.compute_strategic_score_4c(ticker, regime)
         it = next((m["initial_target"] for m in ETF_LIBRARY.values() if m["nom"] == nom), 0.05)
         if it is None: it = 0.05
-
-        # point (g) : priorité à sharpe_rc (Sharpe contraint par RC max),
-        # puis sharpe libre, puis fallback codé en dur.
         opt = st.session_state.get("_opt_weights", {})
         base_w = (opt.get("sharpe_rc", {}).get(ticker)
                   or opt.get("sharpe", {}).get(ticker)
                   or self._get_base_weight(unified["total"], it))
-
         regime_mult = regime["multiplier"]
         ptf_tickers = [p["ticker"] for p in positions_calc if p.get("ticker")]
         ptf_weights = [p["valeur"] / valeur_totale for p in positions_calc if p.get("ticker") and valeur_totale > 0]
@@ -1963,8 +1939,6 @@ class IndicatorEngine:
         return df["Close"].dropna().sort_index()
 
     def compute_underperf_streak(self, ticker: str) -> int:
-        """Nombre de jours consécutifs (depuis aujourd'hui, en remontant) où l'ETF
-        a sous-performé le World (MWRD.PA ou fallback)."""
         close = self._series(ticker)
         if close.empty or len(close) < 2: return 0
         world = get_world_series(self.dm,
@@ -2301,7 +2275,6 @@ class DecisionEngine:
 # MODULE 23bis : TRADUCTION DÉCISION EN LANGAGE CLAIR + CALCUL UNIFIÉ
 # =============================================================================
 def build_decision_sentence(nom: str, ind: Dict, crash: Dict, underperf: Dict, decision: Dict) -> Tuple[str, str]:
-    """Traduit le résultat du DecisionEngine en phrase lisible + couleur hex."""
     action_map = {
         "EXIT": "Sortir intégralement de la position",
         "REDUCE_50": "Réduire la position de 50 %",
@@ -2329,12 +2302,8 @@ def build_decision_sentence(nom: str, ind: Dict, crash: Dict, underperf: Dict, d
 
 
 def compute_all_position_decisions(ui: "StreamlitUI", ptf: Dict) -> List[Dict]:
-    """Calcule une seule fois toutes les décisions pour toutes les positions.
-    Réutilisé par le bandeau résumé ET par le détail technique (Alerte Quant v2).
-    Évite de recalculer EmpiricalAnalogEngine (coûteux) deux fois."""
     world_regime = ui.wre.get_regime()
     now = datetime.now(ZoneInfo("Europe/Paris"))
-
     rc_map = {}
     try:
         tk_held = [p["ticker"] for p in ptf["positions"] if p.get("ticker") and p["valeur"] > 0]
@@ -2350,8 +2319,7 @@ def compute_all_position_decisions(ui: "StreamlitUI", ptf: Dict) -> List[Dict]:
     results = []
     for pos in ptf["positions"]:
         ticker = pos.get("ticker")
-        if not ticker or pos["valeur"] <= 0:
-            continue
+        if not ticker or pos["valeur"] <= 0: continue
         ind = ui.ie.compute(ticker)
         crash = ui.cpe.compute(ind, world_regime["regime"]) if ind else {"score": 0, "level": "N/A", "reasons": []}
         underperf = ui.upe.compute(ind) if ind else {"score": 0, "max_score": 4, "reasons": []}
@@ -2373,7 +2341,6 @@ def compute_all_position_decisions(ui: "StreamlitUI", ptf: Dict) -> List[Dict]:
 
 
 def render_decision_summary_banner(decisions: List[Dict]):
-    """Bandeau résumé en tête d'app, trié par urgence (EXIT en premier, HOLD en dernier)."""
     if not decisions:
         return
     st.markdown("## 🎯 Résumé — Actions recommandées")
@@ -2671,6 +2638,583 @@ class CalibrationEngine:
         total = close.iloc[-1] / close.iloc[0]
         return float((total ** (1/years) - 1) * 100) if total > 0 else None
 
+# =============================================================================
+# MODULE 28 : ETF SPECIALIZED RISK ENGINE v7.1 (corrigé)
+# =============================================================================
+FRED_BASE = "https://fred.stlouisfed.org/graph/fredgraph.csv?id="
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def fetch_fred_series(series_id: str) -> pd.Series:
+    """Récupère une série FRED en CSV public (sans clé API)."""
+    try:
+        r = _requests.get(FRED_BASE + series_id, timeout=10)
+        r.raise_for_status()
+        df = pd.read_csv(_io.StringIO(r.text))
+        df.columns = ["date", "value"]
+        df["date"] = pd.to_datetime(df["date"])
+        df["value"] = pd.to_numeric(df["value"], errors="coerce")
+        return df.dropna().set_index("date")["value"]
+    except Exception:
+        return pd.Series(dtype=float)
+
+def percentile_rank(series: pd.Series, window_years: int = 10) -> Optional[float]:
+    s = series.dropna()
+    if len(s) < 60: return None
+    window = s.iloc[-min(len(s), window_years * 252):]
+    return float((window <= window.iloc[-1]).mean() * 100)
+
+def format_bps(pct_points: float) -> str:
+    """Convertit une valeur en points de % (FRED ex: 4.52 = 4.52%) en bps + %."""
+    return f"{pct_points*100:.0f} bps ({pct_points:.2f}%)"
+
+# --- POINT 8 : constantes nommées, unités explicites (décimal = fraction) ---
+TSS_STRONG_CONTANGO = 0.015
+TSS_NEUTRAL_MAX = 0.005
+TSS_BACKWARD_STRESS = -0.010
+VIX_CALM_LEVEL = 18.0
+VIX_STRESS_LEVEL = 30.0
+
+# --- POINT 10 : persistance par fréquence d'indicateur ---
+PERSISTENCE_CONFIG = {
+    "korea":  {"window": 5,  "threshold": 0.60},
+    "semi":   {"window": 5,  "threshold": 0.60},
+    "world":  {"window": 3,  "threshold": 1.00},
+    "value":  {"window": 10, "threshold": 0.70},
+}
+
+# --- POINT 13/14 : qualité des données (DQ) par moteur ---
+DQ_BASE = {"korea": 0.60, "semi": 0.80, "world": 1.00, "value": 1.00}
+
+
+class KoreaRiskEngine:
+    """Score Korea = proxy technique + proxy macro. DQ = 60%.
+    Le spread crédit réel et les flux étrangers Corée ne sont pas disponibles gratuitement."""
+    def __init__(self, dm: DataManager):
+        self.dm = dm
+
+    def compute(self) -> Dict:
+        details = {}
+        dq = DQ_BASE["korea"]
+
+        krw_usd = self.dm.data.get("KRW=X", pd.DataFrame())
+        credit_proxy_signal = False
+        if not krw_usd.empty and "Close" in krw_usd.columns:
+            close = krw_usd["Close"].dropna()
+            if len(close) > 260:
+                ret = close.pct_change().dropna()
+                vol20 = ret.iloc[-20:].std() * np.sqrt(252)
+                vol_series = ret.rolling(20).std() * np.sqrt(252)
+                pctile = percentile_rank(vol_series)
+                delta_4w = vol20 - float(vol_series.iloc[-20]) if len(vol_series) > 20 else 0
+                credit_proxy_signal = (pctile is not None and pctile >= 75) and (delta_4w > 0)
+                details["credit_proxy_pctile"] = pctile
+                details["credit_proxy_label"] = "⚠ PROXY (vol. KRW/USD) — pas le vrai spread crédit coréen"
+        else:
+            dq -= 0.15
+
+        us_ism = fetch_fred_series("NAPM")
+        us_ism_proxy_signal = False
+        if not us_ism.empty:
+            ism_now = float(us_ism.iloc[-1])
+            ism_3m_ago = float(us_ism.iloc[-4]) if len(us_ism) > 4 else ism_now
+            us_ism_proxy_signal = (ism_now < 50) or ((ism_now - ism_3m_ago) < -2)
+            details["us_ism_value"] = ism_now
+            details["us_ism_label"] = ("⚠ ISM manufacturier US (NAPM/FRED) utilisé comme PROXY cyclique "
+                                        "mondial — ce n'est pas un indicateur coréen")
+        else:
+            dq -= 0.15
+
+        krw_etf = self.dm.data.get("KRW.PA", pd.DataFrame())
+        vol_confirm = False
+        if not krw_etf.empty and "Close" in krw_etf.columns:
+            close = krw_etf["Close"].dropna()
+            if len(close) > 40:
+                ret = close.pct_change().dropna()
+                vol2w = ret.iloc[-10:].std() * np.sqrt(252)
+                vol2w_prev = ret.iloc[-30:-20].std() * np.sqrt(252) if len(ret) > 30 else vol2w
+                vol_confirm = (vol2w / vol2w_prev - 1) > 0.15 if vol2w_prev > 0 else False
+                details["delta_vol_2w"] = (vol2w / vol2w_prev - 1) if vol2w_prev > 0 else None
+
+        samsung_below = self._below_sma50("005930.KS")
+        hynix_below = self._below_sma50("000660.KS")
+        details["samsung_below_sma50"] = samsung_below
+        details["hynix_below_sma50"] = hynix_below
+        details["missing_data_note"] = ("Flux de capitaux étrangers Corée et spread crédit réel : "
+                                         "AUCUNE source gratuite identifiée — non modélisés")
+
+        macro_alert = credit_proxy_signal or us_ism_proxy_signal
+        full_confirm = vol_confirm and bool(samsung_below) and bool(hynix_below)
+        if macro_alert and full_confirm:
+            score = 2
+        elif macro_alert:
+            score = 1
+        else:
+            score = 0
+        details["capped_at_2_missing_foreign_flows"] = True
+        return {"score": score, "dq": round(max(0.0, dq), 2), "details": details}
+
+    def _below_sma50(self, ticker: str) -> Optional[bool]:
+        df = self.dm.data.get(ticker, pd.DataFrame())
+        if df.empty or "Close" not in df.columns: return None
+        close = df["Close"].dropna()
+        if len(close) < 50: return None
+        return bool(close.iloc[-1] < close.rolling(50).mean().iloc[-1])
+
+
+class SemiconductorRiskEngine:
+    def __init__(self, dm: DataManager): self.dm = dm
+
+    def compute(self) -> Dict:
+        dq = DQ_BASE["semi"]
+        above, total = 0, 0
+        for tk in SOX_COMPONENTS_PROXY:
+            df = self.dm.data.get(tk, pd.DataFrame())
+            if df.empty or "Close" not in df.columns: continue
+            close = df["Close"].dropna()
+            if len(close) < 50: continue
+            total += 1
+            if close.iloc[-1] > close.rolling(50).mean().iloc[-1]:
+                above += 1
+        breadth = (above / total * 100) if total > 0 else None
+        if total < 15:
+            dq -= 0.20
+
+        phlx_below_sma50 = None
+        chip_df = self.dm.data.get("CHIP.PA", pd.DataFrame())
+        if not chip_df.empty and "Close" in chip_df.columns:
+            close = chip_df["Close"].dropna()
+            if len(close) >= 50:
+                phlx_below_sma50 = bool(close.iloc[-1] < close.rolling(50).mean().iloc[-1])
+
+        vol_extreme = False
+        if not chip_df.empty and "Close" in chip_df.columns:
+            close = chip_df["Close"].dropna()
+            if len(close) > 260:
+                ret = close.pct_change().dropna()
+                vol20 = ret.rolling(20).std() * np.sqrt(252)
+                pctile = percentile_rank(vol20)
+                vol_extreme = pctile is not None and pctile >= 90
+
+        if breadth is None: score = 0
+        elif breadth < 10 and phlx_below_sma50 and vol_extreme: score = 3
+        elif breadth < 20 and phlx_below_sma50: score = 2
+        elif breadth < 40: score = 1
+        else: score = 0
+        return {"score": score, "dq": round(max(0.0, dq), 2),
+                "details": {"breadth_pct": breadth, "n_components": total,
+                            "phlx_below_sma50": phlx_below_sma50, "vol_extreme": vol_extreme,
+                            "note": "Breadth calculée sur 20 valeurs proxy, pas la composition officielle SOX"}}
+
+
+class WorldRiskEngine:
+    def __init__(self, dm: DataManager): self.dm = dm
+
+    def compute(self) -> Dict:
+        vix_df = self.dm.data.get("^VIX", pd.DataFrame())
+        vix3m_df = self.dm.data.get("^VIX3M", pd.DataFrame())
+        if vix_df.empty or vix3m_df.empty:
+            return {"score": 0, "dq": 0.0, "details": {"note": "VIX ou VIX3M indisponible"}}
+        vix = vix_df["Close"].dropna()
+        vix3m = vix3m_df["Close"].dropna()
+        common = vix.index.intersection(vix3m.index)
+        if len(common) < 5:
+            return {"score": 0, "dq": 0.0, "details": {"note": "Historique insuffisant"}}
+        tss = (vix3m.loc[common] - vix.loc[common]) / vix.loc[common]
+        tss_now = float(tss.iloc[-1])
+        vix_now = float(vix.loc[common[-1]])
+        backwardation_3d = bool((tss.iloc[-3:] < 0).all()) if len(tss) >= 3 else False
+
+        if tss_now < TSS_BACKWARD_STRESS and vix_now > VIX_STRESS_LEVEL: score = 3
+        elif backwardation_3d: score = 2
+        elif 0 <= tss_now <= TSS_NEUTRAL_MAX: score = 1
+        elif tss_now > TSS_STRONG_CONTANGO and vix_now < VIX_CALM_LEVEL: score = 0
+        else: score = 0
+        return {"score": score, "dq": DQ_BASE["world"],
+                "details": {"tss_pct": tss_now * 100, "tss_display": f"{tss_now*100:+.2f}%",
+                            "vix": vix_now, "backwardation_3d": backwardation_3d}}
+
+
+class WorldValueRiskEngine:
+    def __init__(self, dm: DataManager): self.dm = dm
+
+    def compute(self) -> Dict:
+        oas = fetch_fred_series("BAMLH0A0HYM2")
+        if oas.empty:
+            return {"score": 0, "dq": 0.0, "details": {"note": "FRED indisponible"}}
+        oas_now = float(oas.iloc[-1])
+        ma60 = float(oas.iloc[-60:].mean()) if len(oas) >= 60 else oas_now
+        d4w = oas_now - float(oas.iloc[-20]) if len(oas) > 20 else 0.0
+        pctile = percentile_rank(oas, window_years=10)
+
+        if oas_now > 6.0: score = 3
+        elif oas_now > 5.0 and d4w > 0.5: score = 2
+        elif oas_now > ma60 and (pctile is not None and pctile >= 70): score = 1
+        else: score = 0
+        return {"score": score, "dq": DQ_BASE["value"],
+                "details": {"oas_display": format_bps(oas_now), "ma60_display": format_bps(ma60),
+                            "delta_4w_display": format_bps(d4w), "pctile_10y": pctile,
+                            "oas_now": oas_now, "ma60": ma60, "delta_4w": d4w}}
+
+
+class RiskEngineV71:
+    """Orchestrateur : score par ETF + persistance spécifique + DQ + RSG brut ET pondéré qualité."""
+    REDUCTION_MAP = {0: 0.0, 1: 0.0, 2: 0.25, 3: 0.50}
+
+    def __init__(self, dm: DataManager):
+        self.dm = dm
+        self.engines = {"korea": KoreaRiskEngine(dm), "semi": SemiconductorRiskEngine(dm),
+                         "world": WorldRiskEngine(dm), "value": WorldValueRiskEngine(dm)}
+
+    def _update_persistence(self, key: str, raw_score: int) -> Dict:
+        cfg = PERSISTENCE_CONFIG[key]
+        store_key = f"_risk_v71_history_{key}"
+        history = st.session_state.get(store_key, [])
+        history.append(raw_score)
+        history = history[-cfg["window"]:]
+        st.session_state[store_key] = history
+        n_confirmed = sum(1 for s in history if s >= 2)
+        persistence = n_confirmed / len(history) if history else 0.0
+        confirmed_score = raw_score if (raw_score < 2 or persistence >= cfg["threshold"]) else max(0, raw_score - 1)
+        return {"history": history, "persistence_pct": persistence * 100,
+                "confirmed_score": confirmed_score, "persistence_window": cfg["window"],
+                "persistence_threshold_pct": cfg["threshold"] * 100}
+
+    def compute_all(self, weights: Dict[str, float]) -> Dict:
+        confirmed = {}
+        for k, engine in self.engines.items():
+            res = engine.compute()
+            persist = self._update_persistence(k, res["score"])
+            confirmed[k] = {**res, **persist,
+                             "reduction_pct": self.REDUCTION_MAP[persist["confirmed_score"]] * 100}
+        sum_w = sum(weights.get(k, 0) for k in confirmed) or 1.0
+        rsg_raw = sum(weights.get(k, 0) * confirmed[k]["confirmed_score"] for k in confirmed)
+        rsg_q = sum(weights.get(k, 0) * confirmed[k]["confirmed_score"] * confirmed[k]["dq"]
+                    for k in confirmed) / sum_w
+
+        def regime_of(rsg):
+            if rsg < 0.70: return ("Normal", "#22C55E")
+            elif rsg < 1.50: return ("Vigilance", "#F97316")
+            elif rsg < 2.30: return ("Risque élevé", "#F97316")
+            else: return ("Stress systémique", "#FF3131")
+
+        regime_raw = regime_of(rsg_raw)
+        return {"per_etf": confirmed, "rsg_raw": rsg_raw, "rsg_quality_weighted": rsg_q,
+                "regime_label": regime_raw[0], "regime_color": regime_raw[1]}
+
+# =============================================================================
+# MODULE 29 : RISK ENGINE V7.1 — VALIDATION HISTORIQUE (corrigée)
+# =============================================================================
+RISK_HORIZONS = [5, 10, 20, 60]
+KEY_PERSISTENCE_CONFIG = PERSISTENCE_CONFIG
+
+def _forward_min_exclusive(series: pd.Series, window: int) -> pd.Series:
+    """POINT 3 : min(P_{t+1}, ..., P_{t+window}), EXCLUT P_t.
+    Sans cette exclusion, la baisse mesurée était systématiquement sous-estimée."""
+    shifted = series.shift(-1)
+    rev = shifted.iloc[::-1]
+    m = rev.rolling(window, min_periods=window).min()
+    return m.iloc[::-1]
+
+def compute_forward_stats(price: pd.Series, horizons=RISK_HORIZONS) -> pd.DataFrame:
+    out = {}
+    for h in horizons:
+        out[f"fwd_ret_{h}"] = price.shift(-h) / price - 1
+        fwd_min = _forward_min_exclusive(price, h)
+        out[f"fwd_mdd_{h}"] = fwd_min / price - 1
+    return pd.DataFrame(out, index=price.index)
+
+def apply_persistence(raw_score: pd.Series, window: int, threshold: float) -> pd.Series:
+    """Version vectorisée cohérente avec la version live (session_state)."""
+    confirmed_flag = (raw_score >= 2).rolling(window, min_periods=1).mean() >= threshold
+    confirmed = raw_score.copy()
+    downgrade_mask = (raw_score >= 2) & (~confirmed_flag)
+    confirmed[downgrade_mask] = (raw_score[downgrade_mask] - 1).clip(lower=0)
+    return confirmed
+
+def compute_conditional_stats(score_confirmed: pd.Series, price: pd.Series) -> pd.DataFrame:
+    """Stats complètes (mean/median/quantiles/probas de drawdown) par score et horizon.
+    POINT 4 : couvre mean, médiane, P05/P25/P75/P95, MDD et P(MDD<-5%/-10%)."""
+    common = score_confirmed.index.intersection(price.index)
+    if len(common) < 100: return pd.DataFrame()
+    score_c = score_confirmed.loc[common]
+    price_c = price.loc[common]
+    fwd = compute_forward_stats(price_c)
+    df = pd.concat([score_c.rename("score"), fwd], axis=1).dropna(subset=["score"])
+    rows = []
+    for s in [0, 1, 2, 3]:
+        sub = df[df["score"] == s]
+        for h in RISK_HORIZONS:
+            ret_col = sub[f"fwd_ret_{h}"].dropna()
+            mdd_col = sub[f"fwd_mdd_{h}"].dropna()
+            if len(mdd_col) == 0: continue
+            rows.append({
+                "score": s, "horizon": h, "n": len(mdd_col),
+                "ret_mean": ret_col.mean(), "ret_median": ret_col.median(),
+                "ret_p05": ret_col.quantile(.05), "ret_p25": ret_col.quantile(.25),
+                "ret_p75": ret_col.quantile(.75), "ret_p95": ret_col.quantile(.95),
+                "mdd_mean": mdd_col.mean(), "mdd_median": mdd_col.median(),
+                "mdd_p05": mdd_col.quantile(.05),
+                "prob_mdd_lt_5": (mdd_col < -0.05).mean(),
+                "prob_mdd_lt_10": (mdd_col < -0.10).mean(),
+            })
+    return pd.DataFrame(rows)
+
+def format_conditional_stats(stats_df: pd.DataFrame) -> pd.DataFrame:
+    if stats_df.empty: return pd.DataFrame()
+    out = pd.DataFrame()
+    out["Score"] = stats_df["score"].map(lambda s: f"{s}/3")
+    out["Horizon (j)"] = stats_df["horizon"]
+    out["N"] = stats_df["n"]
+    out["Rendement moyen"] = stats_df["ret_mean"].map(lambda v: f"{v*100:+.2f}%")
+    out["Rendement médian"] = stats_df["ret_median"].map(lambda v: f"{v*100:+.2f}%")
+    out["Rendement P05"] = stats_df["ret_p05"].map(lambda v: f"{v*100:+.2f}%")
+    out["Rendement P95"] = stats_df["ret_p95"].map(lambda v: f"{v*100:+.2f}%")
+    out["MDD moyen"] = stats_df["mdd_mean"].map(lambda v: f"{v*100:.2f}%")
+    out["MDD médian"] = stats_df["mdd_median"].map(lambda v: f"{v*100:.2f}%")
+    out["MDD P05 (pire 5%)"] = stats_df["mdd_p05"].map(lambda v: f"{v*100:.2f}%")
+    out["P(MDD<-5%)"] = stats_df["prob_mdd_lt_5"].map(lambda v: f"{v*100:.0f}%")
+    out["P(MDD<-10%)"] = stats_df["prob_mdd_lt_10"].map(lambda v: f"{v*100:.0f}%")
+    return out
+
+def compute_korea_score_series(dm: DataManager) -> pd.Series:
+    krw_usd = dm.data.get("KRW=X", pd.DataFrame())
+    krw_etf = dm.data.get("KRW.PA", pd.DataFrame())
+    samsung = dm.data.get("005930.KS", pd.DataFrame())
+    hynix = dm.data.get("000660.KS", pd.DataFrame())
+    if krw_etf.empty or "Close" not in krw_etf.columns:
+        return pd.Series(dtype=int)
+    idx = krw_etf["Close"].dropna().index
+
+    credit_signal = pd.Series(False, index=idx)
+    if not krw_usd.empty and "Close" in krw_usd.columns:
+        c = krw_usd["Close"].dropna()
+        ret = c.pct_change()
+        vol20 = ret.rolling(20).std() * np.sqrt(252)
+        pctile = vol20.rolling(min(len(vol20), 1500), min_periods=250).rank(pct=True) * 100
+        delta4w = vol20 - vol20.shift(20)
+        sig = (pctile >= 75) & (delta4w > 0)
+        credit_signal = sig.reindex(idx).ffill().fillna(False)
+
+    us_ism_signal = pd.Series(False, index=idx)
+    us_ism = fetch_fred_series("NAPM")
+    if not us_ism.empty:
+        ism_now = us_ism.reindex(idx, method="ffill")
+        ism_3m_ago = us_ism.shift(3).reindex(idx, method="ffill")
+        us_ism_signal = ((ism_now < 50) | ((ism_now - ism_3m_ago) < -2)).fillna(False)
+
+    macro_alert = credit_signal | us_ism_signal
+
+    close_k = krw_etf["Close"].dropna()
+    ret_k = close_k.pct_change()
+    vol2w = ret_k.rolling(10).std() * np.sqrt(252)
+    vol2w_prev = vol2w.shift(20)
+    vol_confirm = ((vol2w / vol2w_prev - 1) > 0.15).reindex(idx).fillna(False)
+
+    def below_sma50(df):
+        if df.empty or "Close" not in df.columns:
+            return pd.Series(False, index=idx)
+        c = df["Close"].dropna()
+        s = c < c.rolling(50).mean()
+        return s.reindex(idx, method="ffill").fillna(False)
+
+    samsung_below = below_sma50(samsung)
+    hynix_below = below_sma50(hynix)
+    full_confirm = vol_confirm & samsung_below & hynix_below
+
+    score = pd.Series(0, index=idx)
+    score[macro_alert & ~full_confirm] = 1
+    score[macro_alert & full_confirm] = 2
+    return score
+
+def compute_semi_score_series(dm: DataManager) -> pd.Series:
+    chip = dm.data.get("CHIP.PA", pd.DataFrame())
+    if chip.empty or "Close" not in chip.columns: return pd.Series(dtype=int)
+    close_chip = chip["Close"].dropna()
+    idx = close_chip.index
+
+    above_frames = []
+    for tk in SOX_COMPONENTS_PROXY:
+        df = dm.data.get(tk, pd.DataFrame())
+        if df.empty or "Close" not in df.columns: continue
+        c = df["Close"].dropna()
+        above = (c > c.rolling(50).mean()).reindex(idx, method="ffill")
+        above_frames.append(above.rename(tk))
+    if not above_frames: return pd.Series(0, index=idx)
+    breadth = pd.concat(above_frames, axis=1).mean(axis=1) * 100
+
+    sma50_chip = close_chip.rolling(50).mean()
+    phlx_below = close_chip < sma50_chip
+
+    ret = close_chip.pct_change()
+    vol20 = ret.rolling(20).std() * np.sqrt(252)
+    vol_pctile = vol20.rolling(min(len(vol20), 1500), min_periods=250).rank(pct=True) * 100
+    vol_extreme = vol_pctile >= 90
+
+    score = pd.Series(0, index=idx)
+    score[(breadth < 40)] = 1
+    score[(breadth < 20) & phlx_below] = 2
+    score[(breadth < 10) & phlx_below & vol_extreme] = 3
+    return score
+
+def compute_world_score_series(dm: DataManager) -> pd.Series:
+    vix = dm.data.get("^VIX", pd.DataFrame())
+    vix3m = dm.data.get("^VIX3M", pd.DataFrame())
+    if vix.empty or vix3m.empty: return pd.Series(dtype=int)
+    v = vix["Close"].dropna()
+    v3 = vix3m["Close"].dropna()
+    idx = v.index.intersection(v3.index)
+    v, v3 = v.loc[idx], v3.loc[idx]
+    tss = (v3 - v) / v
+    backward_3d = (tss < 0).rolling(3).sum() == 3
+
+    score = pd.Series(0, index=idx)
+    score[(tss >= 0) & (tss <= TSS_NEUTRAL_MAX)] = 1
+    score[backward_3d] = 2
+    score[(tss < TSS_BACKWARD_STRESS) & (v > VIX_STRESS_LEVEL)] = 3
+    return score
+
+def compute_value_score_series(dm: DataManager) -> pd.Series:
+    oas = fetch_fred_series("BAMLH0A0HYM2")
+    if oas.empty: return pd.Series(dtype=int)
+    ma60 = oas.rolling(60).mean()
+    d4w = oas - oas.shift(20)
+    pctile = oas.rolling(min(len(oas), 2500), min_periods=250).rank(pct=True) * 100
+
+    score = pd.Series(0, index=oas.index)
+    score[(oas > ma60) & (pctile >= 70)] = 1
+    score[(oas > 5.0) & (d4w > 0.5)] = 2
+    score[(oas > 6.0)] = 3
+    return score
+
+class RiskEngineV71Backtester:
+    ETF_PROXY = {"korea": "KRW.PA", "semi": "CHIP.PA", "world": "MWRD.PA", "value": "WMMS.DE"}
+    SCORE_FUNCS = {"korea": compute_korea_score_series, "semi": compute_semi_score_series,
+                   "world": compute_world_score_series, "value": compute_value_score_series}
+
+    def __init__(self, dm: DataManager): self.dm = dm
+
+    def run(self, key: str) -> Dict:
+        raw_score = self.SCORE_FUNCS[key](self.dm)
+        if raw_score.empty:
+            return {"available": False, "reason": "Données insuffisantes pour ce moteur."}
+        cfg = KEY_PERSISTENCE_CONFIG[key]
+        confirmed = apply_persistence(raw_score, window=cfg["window"], threshold=cfg["threshold"])
+        proxy_tk = self.ETF_PROXY[key]
+        df_price = self.dm.data.get(proxy_tk, pd.DataFrame())
+        if df_price.empty and key == "world":
+            for wt in WORLD_TICKERS:
+                df_price = self.dm.data.get(wt, pd.DataFrame())
+                if not df_price.empty: break
+        if df_price.empty or "Close" not in df_price.columns:
+            return {"available": False, "reason": f"Prix {proxy_tk} indisponible."}
+        price = df_price["Close"].dropna()
+        stats_numeric = compute_conditional_stats(confirmed, price)
+        if stats_numeric.empty:
+            return {"available": False, "reason": "Échantillon insuffisant après alignement."}
+        return {"available": True, "stats_numeric": stats_numeric,
+                "stats_display": format_conditional_stats(stats_numeric),
+                "n_days": len(confirmed)}
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def _cached_conditional_stats(_dm: DataManager, key: str, cache_key: str) -> pd.DataFrame:
+    raw_score = RiskEngineV71Backtester.SCORE_FUNCS[key](_dm)
+    if raw_score.empty: return pd.DataFrame()
+    cfg = KEY_PERSISTENCE_CONFIG[key]
+    confirmed = apply_persistence(raw_score, window=cfg["window"], threshold=cfg["threshold"])
+    proxy_tk = RiskEngineV71Backtester.ETF_PROXY[key]
+    df_price = _dm.data.get(proxy_tk, pd.DataFrame())
+    if df_price.empty and key == "world":
+        for wt in WORLD_TICKERS:
+            df_price = _dm.data.get(wt, pd.DataFrame())
+            if not df_price.empty: break
+    if df_price.empty or "Close" not in df_price.columns:
+        return pd.DataFrame()
+    price = df_price["Close"].dropna()
+    return compute_conditional_stats(confirmed, price)
+
+# =============================================================================
+# MODULE 30 : OPTIMISATION DE LA RÉDUCTION (points 6/7)
+# =============================================================================
+REDUCTION_GRID = [0, 10, 15, 20, 25, 30, 40, 50]
+
+def compute_eal(reduction_pct: float, expected_mdd_pct: float) -> float:
+    """Expected Avoided Loss = réduction × |drawdown futur attendu|.
+    Ex : réduction 25%, MDD futur attendu -8% -> EAL = 2% de perte évitée sur l'exposition."""
+    return (reduction_pct / 100.0) * abs(expected_mdd_pct)
+
+
+class ReductionOptimizer:
+    """Teste plusieurs niveaux de réduction R appliqués quand le score confirmé >= trigger_score,
+    et mesure l'impact réel sur CAGR/MaxDD/Sharpe/Calmar/turnover — comparé au Buy&Hold.
+    Répond à la question : la réduction 25%/50% est-elle optimale, ou arbitraire ?"""
+
+    def __init__(self, dm: DataManager): self.dm = dm
+
+    def run_for_engine(self, key: str, trigger_score: int = 2) -> Dict:
+        score_func = RiskEngineV71Backtester.SCORE_FUNCS[key]
+        raw_score = score_func(self.dm)
+        if raw_score.empty:
+            return {"available": False, "reason": "Série de score indisponible."}
+        cfg = KEY_PERSISTENCE_CONFIG[key]
+        confirmed = apply_persistence(raw_score, window=cfg["window"], threshold=cfg["threshold"])
+
+        proxy_tk = RiskEngineV71Backtester.ETF_PROXY[key]
+        df_price = self.dm.data.get(proxy_tk, pd.DataFrame())
+        if df_price.empty and key == "world":
+            for wt in WORLD_TICKERS:
+                df_price = self.dm.data.get(wt, pd.DataFrame())
+                if not df_price.empty: break
+        if df_price.empty or "Close" not in df_price.columns:
+            return {"available": False, "reason": f"Prix {proxy_tk} indisponible."}
+
+        price = df_price["Close"]
+        common = confirmed.index.intersection(price.index)
+        if len(common) < 300:
+            return {"available": False, "reason": "Historique insuffisant (< 300j communs)."}
+        confirmed = confirmed.loc[common]
+        price = price.loc[common]
+        ret = price.pct_change().fillna(0)
+        active = (confirmed >= trigger_score).astype(float)
+
+        buyhold_metrics = self._metrics(ret)
+        rows = []
+        for R in REDUCTION_GRID:
+            weight = (1.0 - (R / 100.0) * active).shift(1).fillna(1.0)
+            strat_ret = ret * weight
+            m = self._metrics(strat_ret)
+            turnover = float(weight.diff().abs().sum())
+            n_episodes = int((active.diff() == 1).sum())
+            rows.append({
+                "Réduction": f"{R}%",
+                "CAGR (%)": round(m["cagr_pct"], 2) if not np.isnan(m["cagr_pct"]) else None,
+                "Max Drawdown (%)": round(m["max_dd_pct"], 2) if not np.isnan(m["max_dd_pct"]) else None,
+                "Sharpe": round(m["sharpe"], 2) if not np.isnan(m["sharpe"]) else None,
+                "Calmar": round(m["calmar"], 2) if not np.isnan(m["calmar"]) else None,
+                "Turnover": round(turnover, 1),
+                "N épisodes signal": n_episodes,
+                "Alpha vs Buy&Hold (CAGR pts)": round(m["cagr_pct"] - buyhold_metrics["cagr_pct"], 2)
+                                                 if not (np.isnan(m["cagr_pct"]) or np.isnan(buyhold_metrics["cagr_pct"])) else None,
+            })
+        df_grid = pd.DataFrame(rows)
+        valid = df_grid.dropna(subset=["Calmar"])
+        best_reduction = valid.loc[valid["Calmar"].idxmax(), "Réduction"] if not valid.empty else "N/A"
+        return {"available": True, "grid": df_grid, "buyhold": buyhold_metrics,
+                "best_reduction_by_calmar": best_reduction, "n_days": len(common),
+                "trigger_score": trigger_score}
+
+    def _metrics(self, ret: pd.Series) -> Dict:
+        equity = (1 + ret).cumprod()
+        n = len(ret)
+        if n < 30 or equity.iloc[-1] <= 0:
+            return {"cagr_pct": np.nan, "max_dd_pct": np.nan, "sharpe": np.nan, "calmar": np.nan}
+        years = n / 252
+        cagr = equity.iloc[-1] ** (1 / years) - 1
+        vol = ret.std() * np.sqrt(252)
+        rmax = equity.cummax(); dd = equity / rmax - 1; max_dd = dd.min()
+        sharpe = (cagr - 0.025) / vol if vol > 0 else np.nan
+        calmar = cagr / abs(max_dd) if max_dd != 0 else np.nan
+        return {"cagr_pct": cagr * 100, "max_dd_pct": max_dd * 100, "sharpe": sharpe, "calmar": calmar}
+
 # -----------------------------------------------------------------------------
 # MODULE 16 : STREAMLIT UI
 # -----------------------------------------------------------------------------
@@ -2706,7 +3250,7 @@ class StreamlitUI:
         return "+" if v >= 0 else ""
 
     def render_sidebar(self) -> Tuple[bool, List[Dict], float, float, float]:
-        st.sidebar.markdown("## ⚙ Paramètres v7.1")
+        st.sidebar.markdown("## ⚙ Paramètres v7.2")
         mode_direct = st.sidebar.toggle("🔌 Mode Direct (Vue Brute)", value=False)
         st.sidebar.markdown("---")
         cap = st.sidebar.number_input("Capital investi (€)", value=st.session_state["cfg_capital_reel"], step=100.0, format="%.2f", key="input_capital_reel")
@@ -2766,8 +3310,7 @@ class StreamlitUI:
                 "Choisir l'ETF à retirer",
                 options=[pos["ticker"] for pos in current_positions],
                 format_func=lambda x: f"{x} — {ETF_LIBRARY.get(x, {}).get('nom', 'Nom inconnu')}",
-                key="delete_etf_selector"
-            )
+                key="delete_etf_selector")
             st.sidebar.warning(f"Action irréversible : cela supprimera {ticker_to_delete} de tous les modules.")
             if st.sidebar.button("❌ Supprimer définitivement", use_container_width=True, type="primary"):
                 updated_positions = [pos for pos in current_positions if pos["ticker"] != ticker_to_delete]
@@ -2811,7 +3354,7 @@ class StreamlitUI:
         st.markdown('<div style="display:flex;align-items:baseline;gap:1rem;margin-bottom:.2rem;">'
                     '<span style="font-family:Space Mono;font-size:1.6rem;font-weight:700;color:#D4AF37;">◈</span>'
                     '<span style="font-size:1.5rem;font-weight:700;color:#E2E8F0;">COCKPIT DÉCISIONNEL</span>'
-                    '<span style="font-family:Space Mono;font-size:.9rem;color:#6B7585;">v7.1 · ALERTE QUANT + OPTIM RC</span></div>', unsafe_allow_html=True)
+                    '<span style="font-family:Space Mono;font-size:.9rem;color:#6B7585;">v7.2 · RISK ENGINE SPÉCIALISÉ</span></div>', unsafe_allow_html=True)
         c1, c2 = st.columns([3, 1])
         with c1:
             st.caption(f"Prix live · {now.strftime('%d/%m/%Y %H:%M:%S')} (Paris) · Cache 30s/90s")
@@ -2988,7 +3531,7 @@ class StreamlitUI:
         if mwr_adj is not None:
             gap = bench.get("gap", 0.0) or 0.0
             gc = "#22C55E" if gap >= 0 else "#FF3131"
-            st.markdown(f'<div class="pedagogy-box"><div class="pedagogy-title">🆕 v7.1 --- Benchmark MWR Cash-Flow Adjusted</div>'
+            st.markdown(f'<div class="pedagogy-box"><div class="pedagogy-title">🆕 v7.2 --- Benchmark MWR Cash-Flow Adjusted</div>'
                         f'Le "Gap vs World" est calculé en simulant l\'achat de MWRD.PA aux mêmes dates et montants que vos flux réels. '
                         f'<b>World MWR = {s(mwr_adj)}{mwr_adj:.2f}%</b> · '
                         f'<b style="color:{gc};">Votre Alpha = {s(gap)}{gap:.2f}%</b></div>', unsafe_allow_html=True)
@@ -3011,7 +3554,6 @@ class StreamlitUI:
                     f'<div style="font-size:.9rem;color:#8892AA;margin:.4rem 0;">{verdict["detail"]}</div>'
                     f'<div style="font-size:.9rem;color:#CBD5E1;">💡 {verdict["action"]}</div></div>', unsafe_allow_html=True)
 
-    # === FIX #1 : Camembert + tableau répartition actuelle vs optimale ===
     def _render_optimal_pie_and_table(self, tickers, names, current_w, w_sharpe, w_rp, vt):
         st.markdown("### 🥧 Répartition Actuelle vs Optimale (Max Sharpe)")
         col_pie1, col_pie2 = st.columns(2)
@@ -3068,7 +3610,6 @@ class StreamlitUI:
         if len(tickers) < 2:
             st.info("Au moins 2 positions sont nécessaires pour optimiser.")
             return
-        # Résolution tickers Yahoo
         yf_to_id, yf_tickers = {}, []
         for tk_id in tickers:
             meta = ETF_LIBRARY.get(tk_id, {})
@@ -3087,7 +3628,6 @@ class StreamlitUI:
         vt = ptf["valeur_totale"]
         current_w = {p["ticker"]: p["valeur"] / vt for p in ptf["positions"] if p.get("ticker") and p["valeur"] > 0}
 
-        # === FIX #1 : camembert + tableau AVANT le bar chart ===
         self._render_optimal_pie_and_table(tickers, names, current_w, w_sharpe, w_rp, vt)
 
         fig = go.Figure()
@@ -3501,7 +4041,6 @@ class StreamlitUI:
                     st.metric(lbl, "N/A")
             st.markdown('</div>', unsafe_allow_html=True)
 
-    # === FIX #2 : render_quant_alert_v2 ne calcule plus rien, affiche seulement les décisions reçues ===
     def render_quant_alert_v2(self, decisions: List[Dict]):
         st.markdown("## 🧭 Alerte Quantitative — Decision Engine v2")
         st.caption("Combine Trend, Relative Strength, Crash Protection, Underperformance, "
@@ -3514,10 +4053,8 @@ class StreamlitUI:
                         f'🌍 World Regime : <b style="color:{rc};">{wr["regime"]}</b> · '
                         f'Vol Shock : {wr.get("vol_shock","N/A")} · Drawdown : {wr.get("drawdown","N/A")}%</div>',
                         unsafe_allow_html=True)
-
         decision_colors = {"HOLD": "#22C55E", "WATCH": "#F97316", "REDUCE_25": "#F97316",
                            "REDUCE_50": "#FF3131", "EXIT": "#FF3131", "RE_ENTER": "#3B82F6", "NO_DECISION": "#6B7585"}
-
         for d in decisions:
             result = d["decision"]; ind = d["ind"]; crash = d["crash"]; underperf = d["underperf"]
             dcol = decision_colors.get(result["decision"], "#6B7585")
@@ -3554,7 +4091,6 @@ class StreamlitUI:
                             st.write(f"• {r}")
                 st.markdown('</div>', unsafe_allow_html=True)
 
-    # === FIX #3 : Backtest & Calibration en boucle sur les 5 ETF, imprimable ===
     def render_backtest_calibration_tab(self, ptf: Dict):
         st.markdown("## 🧪 Backtest & Calibration (Priorité 3)")
         st.caption("Walk-forward, comparaison de stratégies, calibration des seuils hors-échantillon. "
@@ -3645,11 +4181,9 @@ class StreamlitUI:
             else:
                 st.warning(calib_res.get("reason", "Calibration indisponible."))
 
-    # === point (d) : table long terme mise en cache 1h ===
     def render_long_term_cockpit(self, ptf: Dict, analytics_engine: AnalyticsEngine, regime: Dict):
         st.markdown("## 📈 Cockpit Décisionnel Long Terme — Analyse de tous les ETF disponibles")
         st.caption("Résumé des métriques clés pour l'ensemble des ETF de la bibliothèque (même ceux non détenus).")
-        # Clé de cache basée sur la date + nombre de tickers chargés
         cache_key = f"{datetime.now().strftime('%Y-%m-%d')}_{len(self.dm.data)}"
         df_table = _cached_long_term_table(self.dm, cache_key)
         if df_table.empty:
@@ -3866,6 +4400,124 @@ class StreamlitUI:
         else:
             st.markdown('<div class="arb-neutral">✅ Aucune opportunité d\'arbitrage significative détectée.</div>', unsafe_allow_html=True)
 
+    # =========================================================================
+    # RISK ENGINE v7.1 — 3 vues : Scores en direct / Validation / Optimisation
+    # =========================================================================
+    def render_risk_engine_v71(self, ptf: Dict):
+        st.markdown("## 🛡 Risk Engine v7.1 — Scores en direct")
+        st.caption("Chaque score est confirmé par une persistance spécifique à sa fréquence "
+                   "(technique quotidien 3/5j, VIX 3/3j consécutives, crédit ~2 semaines).")
+        vt = ptf["valeur_totale"]
+        w_map = {
+            "korea": next((p["valeur"] for p in ptf["positions"] if p.get("ticker") == "KRW.PA"), 0) / vt if vt else 0,
+            "semi": next((p["valeur"] for p in ptf["positions"] if p.get("ticker") == "CHIP.PA"), 0) / vt if vt else 0,
+            "world": next((p["valeur"] for p in ptf["positions"] if p.get("ticker") in ("MWRD.PA", "DCAM.PA")), 0) / vt if vt else 0,
+            "value": next((p["valeur"] for p in ptf["positions"] if p.get("ticker") == "WMMS.DE"), 0) / vt if vt else 0,
+        }
+        engine = RiskEngineV71(self.dm)
+        with st.spinner("Calcul des scores..."):
+            result = engine.compute_all(w_map)
+
+        c1, c2 = st.columns(2)
+        c1.markdown(f'<div class="regime-banner" style="background:{result["regime_color"]}22;'
+                    f'border:1px solid {result["regime_color"]};">'
+                    f'🌐 RSG brut : <b>{result["rsg_raw"]:.2f}</b> — '
+                    f'<b style="color:{result["regime_color"]};">{result["regime_label"]}</b></div>',
+                    unsafe_allow_html=True)
+        c2.markdown(f'<div class="regime-banner regime-pending">'
+                    f'⚖ RSG pondéré qualité : <b>{result["rsg_quality_weighted"]:.2f}</b> '
+                    f'<span style="font-size:.75rem;opacity:.7;">(pénalise Korea/Semi pour leurs proxys)</span></div>',
+                    unsafe_allow_html=True)
+
+        labels = {"korea": "🇰🇷 Korea", "semi": "💻 Semiconductor", "world": "🌍 World", "value": "💎 World Value"}
+        cache_key = datetime.now().strftime("%Y-%m-%d")
+
+        for key in ["korea", "semi", "world", "value"]:
+            d = result["per_etf"][key]
+            score_color = {0: "#22C55E", 1: "#3B82F6", 2: "#F97316", 3: "#FF3131"}[d["confirmed_score"]]
+            weight_pct = w_map.get(key, 0) * 100
+            reduction = d["reduction_pct"]
+            target_pct = weight_pct * (1 - reduction / 100)
+            to_sell_pct = weight_pct - target_pct
+
+            stats_df = _cached_conditional_stats(self.dm, key, cache_key)
+            hist_block = ""
+            if not stats_df.empty:
+                row = stats_df[(stats_df["score"] == d["confirmed_score"]) & (stats_df["horizon"] == 20)]
+                if not row.empty:
+                    r = row.iloc[0]
+                    hist_block = (f"<br><b>Historique SR={d['confirmed_score']}/3 (horizon 20j)</b> :<br>"
+                                  f"MDD médian : {r['mdd_median']*100:.2f}% · MDD P05 (pire 5%) : {r['mdd_p05']*100:.2f}%<br>"
+                                  f"P(MDD&lt;-5%) : {r['prob_mdd_lt_5']*100:.0f}% · "
+                                  f"P(MDD&lt;-10%) : {r['prob_mdd_lt_10']*100:.0f}% · n={int(r['n'])} jours<br>"
+                                  f"Perte évitée estimée (EAL) : {compute_eal(reduction, r['mdd_median']*100):.2f}%")
+
+            st.markdown(f'''<div class="card" style="border-left:4px solid {score_color};">
+                <div style="font-weight:700;font-size:1.05rem;">{labels[key]} — SR {d["confirmed_score"]}/3
+                    {"— Signal confirmé" if d["confirmed_score"] >= 2 else ""}</div>
+                <div style="margin-top:.4rem;">
+                    Exposition actuelle : <b>{weight_pct:.1f}%</b> ·
+                    Réduction recommandée : <b>{reduction:.0f}%</b> ·
+                    Exposition cible : <b>{target_pct:.1f}%</b> ·
+                    À désinvestir : <b>{to_sell_pct:.1f}%</b> du portefeuille
+                </div>
+                <div style="margin-top:.4rem;font-size:.82rem;color:#8892AA;">{hist_block}</div>
+                <div style="margin-top:.5rem;font-size:.78rem;color:#6B7585;">
+                    Qualité du signal (DQ) : <b>{d["dq"]*100:.0f}%</b> ·
+                    Persistance : {d["persistence_pct"]:.0f}% sur {d["persistence_window"]} séances
+                    (seuil {d["persistence_threshold_pct"]:.0f}%)
+                </div>
+            </div>''', unsafe_allow_html=True)
+            with st.expander("Détails techniques"):
+                st.json(d["details"])
+
+    def render_risk_v71_validation(self):
+        st.markdown("## 🧪 Validation historique complète")
+        st.caption("Distribution complète (moyenne/médiane/quantiles/probabilités) des rendements "
+                   "et drawdowns futurs, conditionnés par le score confirmé.")
+        backtester = RiskEngineV71Backtester(self.dm)
+        labels = {"korea": "🇰🇷 Korea", "semi": "💻 Semiconductor", "world": "🌍 World", "value": "💎 World Value"}
+        for key, label in labels.items():
+            st.markdown(f"### {label}")
+            with st.spinner(f"Calcul — {label}..."):
+                res = backtester.run(key)
+            if not res.get("available"):
+                st.warning(res.get("reason", "Indisponible"))
+                continue
+            st.caption(f"{res['n_days']} jours analysés")
+            st.dataframe(res["stats_display"], use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+        st.markdown('<div class="pedagogy-box"><b>Limitations données gratuites :</b><br>'
+                    '• Korea : proxy vol KRW/USD + ISM US (pas un ISM coréen) → DQ = 60%.<br>'
+                    '• Semiconductor : breadth sur 20 valeurs proxy, pas la composition SOX officielle → DQ = 80%.<br>'
+                    '• Historique limité à ~6 ans (HISTORICAL_DAYS=1500).</div>', unsafe_allow_html=True)
+
+    def render_risk_v71_optimizer(self, ptf: Dict):
+        st.markdown("## 🎯 Optimisation de la réduction — 25%/50% sont-ils justifiés ?")
+        st.caption("Teste chaque niveau de réduction contre l'historique réel et sélectionne "
+                   "le meilleur par ratio de Calmar (rendement / drawdown).")
+        optimizer = ReductionOptimizer(self.dm)
+        labels = {"korea": "🇰🇷 Korea", "semi": "💻 Semiconductor", "world": "🌍 World", "value": "💎 World Value"}
+        for key, label in labels.items():
+            st.markdown(f"### {label} — déclenché à SR≥2")
+            with st.spinner(f"Grid search — {label}..."):
+                res = optimizer.run_for_engine(key, trigger_score=2)
+            if not res.get("available"):
+                st.warning(res.get("reason", "Indisponible"))
+                continue
+            st.dataframe(res["grid"], use_container_width=True, hide_index=True)
+            bh = res["buyhold"]
+            st.caption(f"Buy&Hold : CAGR {bh['cagr_pct']:.1f}% · MaxDD {bh['max_dd_pct']:.1f}% · "
+                       f"Calmar {bh['calmar']:.2f}")
+            best = res["best_reduction_by_calmar"]
+            current = "25%"
+            if best != current:
+                st.warning(f"⚠ Meilleur niveau historique par Calmar : **{best}** "
+                           f"(différent de la valeur actuellement codée en dur : {current})")
+            else:
+                st.success(f"✅ Le niveau actuellement codé ({current}) est aussi le meilleur historiquement.")
+
     def render_footer(self, mode_direct: bool, capital: float, score_em: int, regime_label: str, live_ok: int, live_total: int):
         st.markdown("---")
         col_f1, col_f2 = st.columns([4, 1])
@@ -3873,7 +4525,7 @@ class StreamlitUI:
             s = self._sign
             mode_txt = "🔌 MODE DIRECT" if mode_direct else "Ajust. patrimonial actif"
             persist = "GitHub Gist + SQLite" if self.pm.status == "github" else "SQLite local (tempdir)"
-            st.caption(f"◈ Cockpit v7.1 · Alerte Quant · Optim RC · {mode_txt} · "
+            st.caption(f"◈ Cockpit v7.2 · Risk Engine v7.1 intégré · {mode_txt} · "
                        f"Régime : {regime_label} · Capital {capital:,.2f}€ · Persistance : {persist} · {live_ok}/{live_total} prix live · "
                        f"Benchmark : MWR Cash-Flow Adjusted · Outil personnel --- Ne constitue pas un conseil en investissement")
         with col_f2:
@@ -3885,11 +4537,8 @@ class StreamlitUI:
 # -----------------------------------------------------------------------------
 _PLOTLY_BASE = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#CBD5E1", family="DM Sans"))
 
-# === point (d) : cache de la table long terme (150 ETF) ===
 @st.cache_data(ttl=3600, show_spinner=False)
 def _cached_long_term_table(_dm: DataManager, cache_key: str) -> pd.DataFrame:
-    """Construit la table HTML long terme pour tous les ETF de la bibliothèque.
-    Mise en cache 1h : évite de recalculer 150 rolling windows à chaque clic."""
     analytics = AnalyticsEngine(_dm)
 
     def relative_perf_3w(ticker):
@@ -4179,7 +4828,6 @@ def main():
         pe = PortfolioEngine(dm, mre, qre)
         pde = PedagogicEngine()
         se = StrategicEngine(dm, mre, qre)
-        # QuantAlertEngine supprimé (code mort — remplacé par DecisionEngine v2)
         ui = StreamlitUI(dm, pm, mre, qre, pe, pde, se, pcm=pcm, te=te)
 
     mode_direct, positions_conf, capital_reel, ajustement_pat, bonus_fortuneo = ui.render_sidebar()
@@ -4189,7 +4837,6 @@ def main():
         bench = pe.compute_benchmark(positions_conf, ptf["perf_tot_pct"])
         regime = mre.get_full_regime()
 
-        # === Optimiseur (avec sharpe_rc contraint par Risk Contribution) ===
         held_tickers = [p["ticker"] for p in positions_conf if p.get("ticker") and p["parts"] > 0]
         yf_held = []
         for tk_id in held_tickers:
@@ -4231,7 +4878,7 @@ def main():
                 unified_scores[ticker] = pe.compute_unified_score(ticker)
                 target_weights[ticker] = pe.compute_target_weight(
                     pos["nom"], ticker, ptf["valeur_totale"], ptf["positions"],
-                    unified_precomputed=unified_scores[ticker])  # point (a)
+                    unified_precomputed=unified_scores[ticker])
 
         ld_alerts = pe.check_leadership_alerts()
         phase_text, phase_color = pe.determine_phase(bench.get("gap"), etf_analyses or {})
@@ -4239,16 +4886,16 @@ def main():
         live_ok = sum(1 for v in dm.live.values() if v.get("prix"))
         live_total = len(dm.live)
 
-        # === FIX #2 : calcul unique des décisions, réutilisé par le résumé ET le détail ===
         decisions = compute_all_position_decisions(ui, ptf)
 
-    tab_dashboard, tab_transactions, tab_screener, tab_backtest = st.tabs(
-        ["📊 Dashboard", "📈 Transactions", "🔍 Screener", "🧪 Backtest & Calibration"]
+    tab_dashboard, tab_transactions, tab_screener, tab_backtest, tab_risk_v71 = st.tabs(
+        ["📊 Dashboard", "📈 Transactions", "🔍 Screener", "🧪 Backtest & Calibration",
+         "🛡 Risk Engine v7.1"]
     )
 
     with tab_dashboard:
         ui.render_header(mode_direct, live_ok, live_total)
-        render_decision_summary_banner(decisions)   # <-- résumé en tête, juste après le header
+        render_decision_summary_banner(decisions)
         ui.render_regime_banner(regime)
         for al in ld_alerts:
             gv, nom_al, sp, wp = al["gap"], al["nom"], al["sat_perf"], al["world_perf"]
@@ -4263,7 +4910,7 @@ def main():
         ui.render_command_center(ptf, bench, mode_direct, pm)
         ui.render_portfolio_leadership_comparison(ptf)
         ui.render_equity_curve_section(ptf, regime, positions_conf)
-        ui.render_optimal_allocation_section(ptf)     # contient camembert + tableau + bar chart + WF
+        ui.render_optimal_allocation_section(ptf)
         ui.render_risk_dashboard(ptf)
         st.markdown("## 🧠 Analyse des ETF Satellites")
 
@@ -4318,7 +4965,7 @@ def main():
                     ui.render_satellite_card_pedagogic("MSCI Semiconductors", "CHIP.PA", chip_unified, chip_target, regime, sent_rows, "chip", gap_vs_world=chip_gap)
 
         ui.render_sentinelles_macro(ptf)
-        ui.render_quant_alert_v2(decisions)             # <-- signature changée : reçoit decisions
+        ui.render_quant_alert_v2(decisions)
         ui.render_long_term_cockpit(ptf, AnalyticsEngine(dm), regime)
         ui.render_fiscal_simulator(ptf)
         ui.render_position_sizing(ptf, regime["confirmed_label"])
@@ -4332,7 +4979,17 @@ def main():
         ui.render_screener_tab()
 
     with tab_backtest:
-        ui.render_backtest_calibration_tab(ptf)   # boucle interne sur les 5 ETF
+        ui.render_backtest_calibration_tab(ptf)
+
+    with tab_risk_v71:
+        sub_live, sub_valid, sub_optim = st.tabs(
+            ["📡 Scores en direct", "🧪 Validation historique", "🎯 Optimisation réduction"])
+        with sub_live:
+            ui.render_risk_engine_v71(ptf)
+        with sub_valid:
+            ui.render_risk_v71_validation()
+        with sub_optim:
+            ui.render_risk_v71_optimizer(ptf)
 
 if __name__ == "__main__" or True:
     main()
