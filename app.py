@@ -5,6 +5,7 @@
 #   • MODULE 28 : ETF Specialized Risk Engine (Korea, Semi, World, World Value)
 #   • MODULE 29 : Validation historique (SR vs rendements futurs corrigée)
 #   • MODULE 30 : Optimisation de la réduction (25%/50% validés empiriquement)
+#   • MODULE 31 : Couche pédagogique + verdict consolidé
 #   • Onglet dédié "🛡 Risk Engine v7.1" avec 3 sous-onglets
 #   • Corrections senior : forward_min exclusif, stats complètes, DQ, persistance
 #     par fréquence, unités explicites (bps, %), RSG brut ET pondéré qualité
@@ -2639,7 +2640,7 @@ class CalibrationEngine:
         return float((total ** (1/years) - 1) * 100) if total > 0 else None
 
 # =============================================================================
-# MODULE 28 : ETF SPECIALIZED RISK ENGINE v7.1 (corrigé)
+# MODULE 28 : ETF SPECIALIZED RISK ENGINE v7.1 (PATCH 1)
 # =============================================================================
 FRED_BASE = "https://fred.stlouisfed.org/graph/fredgraph.csv?id="
 
@@ -2683,12 +2684,27 @@ PERSISTENCE_CONFIG = {
 }
 
 # --- POINT 13/14 : qualité des données (DQ) par moteur ---
-DQ_BASE = {"korea": 0.60, "semi": 0.80, "world": 1.00, "value": 1.00}
+# PATCH 1 : DQ réaliste, sans faire semblant qu'un bloc "ISM" fiable existe
+DQ_BASE = {"korea": 0.45, "semi": 0.80, "world": 1.00, "value": 1.00}
+
+
+# --- PATCH 1 : NOUVELLE fonction remplaçant fetch_fred_series("NAPM") ---
+def fetch_us_cyclical_proxy() -> Tuple[pd.Series, str]:
+    """Retourne (série de croissance YoY en %, nom de la série utilisée).
+    NAPM (ISM manufacturier) n'est plus publié sur FRED depuis 2016 (litige de licence
+    entre l'ISM et FRED). On utilise à la place AMTMNO (nouvelles commandes
+    manufacturières US), qui EST disponible gratuitement et en continu."""
+    s = fetch_fred_series("AMTMNO")
+    if s.empty:
+        return pd.Series(dtype=float), "INDISPONIBLE"
+    yoy = s.pct_change(12) * 100   # données mensuelles -> variation sur 12 mois
+    return yoy.dropna(), "AMTMNO (nouvelles commandes manufacturières US)"
 
 
 class KoreaRiskEngine:
-    """Score Korea = proxy technique + proxy macro. DQ = 60%.
-    Le spread crédit réel et les flux étrangers Corée ne sont pas disponibles gratuitement."""
+    """Score Korea = proxy technique + proxy macro. Ce n'est PAS un modèle de crédit
+    coréen réel : le spread crédit et les flux de capitaux étrangers, indisponibles
+    gratuitement, sont absents. DQ réaliste = 45%."""
     def __init__(self, dm: DataManager):
         self.dm = dm
 
@@ -2696,6 +2712,7 @@ class KoreaRiskEngine:
         details = {}
         dq = DQ_BASE["korea"]
 
+        # --- Proxy crédit : volatilité KRW/USD (percentile) ---
         krw_usd = self.dm.data.get("KRW=X", pd.DataFrame())
         credit_proxy_signal = False
         if not krw_usd.empty and "Close" in krw_usd.columns:
@@ -2710,20 +2727,27 @@ class KoreaRiskEngine:
                 details["credit_proxy_pctile"] = pctile
                 details["credit_proxy_label"] = "⚠ PROXY (vol. KRW/USD) — pas le vrai spread crédit coréen"
         else:
-            dq -= 0.15
+            dq -= 0.10
 
-        us_ism = fetch_fred_series("NAPM")
-        us_ism_proxy_signal = False
-        if not us_ism.empty:
-            ism_now = float(us_ism.iloc[-1])
-            ism_3m_ago = float(us_ism.iloc[-4]) if len(us_ism) > 4 else ism_now
-            us_ism_proxy_signal = (ism_now < 50) or ((ism_now - ism_3m_ago) < -2)
-            details["us_ism_value"] = ism_now
-            details["us_ism_label"] = ("⚠ ISM manufacturier US (NAPM/FRED) utilisé comme PROXY cyclique "
-                                        "mondial — ce n'est pas un indicateur coréen")
+        # --- Proxy cyclique US (remplace l'ancien NAPM cassé) ---
+        yoy_series, source_name = fetch_us_cyclical_proxy()
+        us_cyclical_signal = False
+        if not yoy_series.empty:
+            yoy_now = float(yoy_series.iloc[-1])
+            yoy_3m_ago = float(yoy_series.iloc[-4]) if len(yoy_series) > 4 else yoy_now
+            us_cyclical_signal = (yoy_now < 0) or ((yoy_now - yoy_3m_ago) < -2.0)
+            details["us_cyclical_proxy_yoy_pct"] = round(yoy_now, 2)
+            details["us_cyclical_proxy_source"] = source_name
+            details["us_cyclical_proxy_label"] = (
+                "⚠ PROXY cyclique mondial US (PAS un indicateur coréen). "
+                "L'ancien indicateur ISM (NAPM) n'est plus publié gratuitement depuis 2016 ; "
+                "remplacé ici par la croissance annuelle des commandes manufacturières US."
+            )
         else:
             dq -= 0.15
+            details["us_cyclical_proxy_label"] = "❌ Source FRED indisponible actuellement — bloc désactivé"
 
+        # --- Confirmation technique ---
         krw_etf = self.dm.data.get("KRW.PA", pd.DataFrame())
         vol_confirm = False
         if not krw_etf.empty and "Close" in krw_etf.columns:
@@ -2742,7 +2766,7 @@ class KoreaRiskEngine:
         details["missing_data_note"] = ("Flux de capitaux étrangers Corée et spread crédit réel : "
                                          "AUCUNE source gratuite identifiée — non modélisés")
 
-        macro_alert = credit_proxy_signal or us_ism_proxy_signal
+        macro_alert = credit_proxy_signal or us_cyclical_signal
         full_confirm = vol_confirm and bool(samsung_below) and bool(hynix_below)
         if macro_alert and full_confirm:
             score = 2
@@ -2755,9 +2779,11 @@ class KoreaRiskEngine:
 
     def _below_sma50(self, ticker: str) -> Optional[bool]:
         df = self.dm.data.get(ticker, pd.DataFrame())
-        if df.empty or "Close" not in df.columns: return None
+        if df.empty or "Close" not in df.columns:
+            return None
         close = df["Close"].dropna()
-        if len(close) < 50: return None
+        if len(close) < 50:
+            return None
         return bool(close.iloc[-1] < close.rolling(50).mean().iloc[-1])
 
 
@@ -2865,19 +2891,35 @@ class RiskEngineV71:
         self.engines = {"korea": KoreaRiskEngine(dm), "semi": SemiconductorRiskEngine(dm),
                          "world": WorldRiskEngine(dm), "value": WorldValueRiskEngine(dm)}
 
+    # --- PATCH 1 : _update_persistence indexée par DATE réelle ---
     def _update_persistence(self, key: str, raw_score: int) -> Dict:
+        """CORRECTION CRITIQUE : la persistance est maintenant indexée par DATE réelle,
+        pas par nombre de rechargements de page. Recharger la page 10 fois dans la même
+        journée n'ajoute plus 10 entrées fictives à l'historique — une seule par jour."""
         cfg = PERSISTENCE_CONFIG[key]
+        today = datetime.now(ZoneInfo("Europe/Paris")).strftime("%Y-%m-%d")
         store_key = f"_risk_v71_history_{key}"
         history = st.session_state.get(store_key, [])
-        history.append(raw_score)
-        history = history[-cfg["window"]:]
-        st.session_state[store_key] = history
-        n_confirmed = sum(1 for s in history if s >= 2)
-        persistence = n_confirmed / len(history) if history else 0.0
+        if not history or history[-1]["date"] != today:
+            history.append({"date": today, "score": raw_score})
+            history = history[-cfg["window"]:]
+            st.session_state[store_key] = history
+        else:
+            # Même jour : on met à jour la valeur du jour (le marché a pu bouger),
+            # sans dupliquer l'entrée.
+            history[-1]["score"] = raw_score
+            st.session_state[store_key] = history
+
+        scores = [h["score"] for h in history]
+        n_confirmed = sum(1 for s in scores if s >= 2)
+        persistence = n_confirmed / len(scores) if scores else 0.0
         confirmed_score = raw_score if (raw_score < 2 or persistence >= cfg["threshold"]) else max(0, raw_score - 1)
-        return {"history": history, "persistence_pct": persistence * 100,
+        n_days_tracked = len(scores)
+        enough_history = n_days_tracked >= cfg["window"]
+        return {"history": scores, "persistence_pct": persistence * 100,
                 "confirmed_score": confirmed_score, "persistence_window": cfg["window"],
-                "persistence_threshold_pct": cfg["threshold"] * 100}
+                "persistence_threshold_pct": cfg["threshold"] * 100,
+                "n_days_tracked": n_days_tracked, "enough_history": enough_history}
 
     def compute_all(self, weights: Dict[str, float]) -> Dict:
         confirmed = {}
@@ -2959,12 +3001,29 @@ def compute_conditional_stats(score_confirmed: pd.Series, price: pd.Series) -> p
             })
     return pd.DataFrame(rows)
 
+# --- PATCH 2 : format_conditional_stats avec indicateur de confiance ---
 def format_conditional_stats(stats_df: pd.DataFrame) -> pd.DataFrame:
-    if stats_df.empty: return pd.DataFrame()
+    """Version affichable, avec un indicateur de confiance basé sur la taille
+    d'échantillon — pour qu'un score sur 12 jours ne s'affiche pas avec la même
+    autorité visuelle qu'un score sur 700 jours."""
+    if stats_df.empty:
+        return pd.DataFrame()
+
+    def confidence_label(n):
+        if n < 30:
+            return "🔴 Très faible (n<30)"
+        elif n < 100:
+            return "🟠 Faible (n<100)"
+        elif n < 300:
+            return "🟡 Correcte"
+        else:
+            return "🟢 Bonne"
+
     out = pd.DataFrame()
     out["Score"] = stats_df["score"].map(lambda s: f"{s}/3")
     out["Horizon (j)"] = stats_df["horizon"]
     out["N"] = stats_df["n"]
+    out["Fiabilité statistique"] = stats_df["n"].map(confidence_label)
     out["Rendement moyen"] = stats_df["ret_mean"].map(lambda v: f"{v*100:+.2f}%")
     out["Rendement médian"] = stats_df["ret_median"].map(lambda v: f"{v*100:+.2f}%")
     out["Rendement P05"] = stats_df["ret_p05"].map(lambda v: f"{v*100:+.2f}%")
@@ -2976,6 +3035,7 @@ def format_conditional_stats(stats_df: pd.DataFrame) -> pd.DataFrame:
     out["P(MDD<-10%)"] = stats_df["prob_mdd_lt_10"].map(lambda v: f"{v*100:.0f}%")
     return out
 
+# --- PATCH 1 : compute_korea_score_series avec fetch_us_cyclical_proxy ---
 def compute_korea_score_series(dm: DataManager) -> pd.Series:
     krw_usd = dm.data.get("KRW=X", pd.DataFrame())
     krw_etf = dm.data.get("KRW.PA", pd.DataFrame())
@@ -2995,14 +3055,15 @@ def compute_korea_score_series(dm: DataManager) -> pd.Series:
         sig = (pctile >= 75) & (delta4w > 0)
         credit_signal = sig.reindex(idx).ffill().fillna(False)
 
-    us_ism_signal = pd.Series(False, index=idx)
-    us_ism = fetch_fred_series("NAPM")
-    if not us_ism.empty:
-        ism_now = us_ism.reindex(idx, method="ffill")
-        ism_3m_ago = us_ism.shift(3).reindex(idx, method="ffill")
-        us_ism_signal = ((ism_now < 50) | ((ism_now - ism_3m_ago) < -2)).fillna(False)
+    # Même source que le moteur live (AMTMNO), plus NAPM (mort depuis 2016)
+    us_cyclical_signal = pd.Series(False, index=idx)
+    yoy_series, _ = fetch_us_cyclical_proxy()
+    if not yoy_series.empty:
+        yoy_now = yoy_series.reindex(idx, method="ffill")
+        yoy_3m_ago = yoy_series.shift(3).reindex(idx, method="ffill")
+        us_cyclical_signal = ((yoy_now < 0) | ((yoy_now - yoy_3m_ago) < -2.0)).fillna(False)
 
-    macro_alert = credit_signal | us_ism_signal
+    macro_alert = credit_signal | us_cyclical_signal
 
     close_k = krw_etf["Close"].dropna()
     ret_k = close_k.pct_change()
@@ -3150,6 +3211,7 @@ class ReductionOptimizer:
 
     def __init__(self, dm: DataManager): self.dm = dm
 
+    # --- PATCH 3 : seuil minimal d'échantillon ---
     def run_for_engine(self, key: str, trigger_score: int = 2) -> Dict:
         score_func = RiskEngineV71Backtester.SCORE_FUNCS[key]
         raw_score = score_func(self.dm)
@@ -3196,10 +3258,15 @@ class ReductionOptimizer:
                                                  if not (np.isnan(m["cagr_pct"]) or np.isnan(buyhold_metrics["cagr_pct"])) else None,
             })
         df_grid = pd.DataFrame(rows)
+        # POINT DE FIABILITÉ : combien de jours ont réellement connu ce signal ?
+        n_signal_days = int(active.sum())
+        MIN_N_TRUST = 50
         valid = df_grid.dropna(subset=["Calmar"])
         best_reduction = valid.loc[valid["Calmar"].idxmax(), "Réduction"] if not valid.empty else "N/A"
+        reliable = n_signal_days >= MIN_N_TRUST
         return {"available": True, "grid": df_grid, "buyhold": buyhold_metrics,
                 "best_reduction_by_calmar": best_reduction, "n_days": len(common),
+                "n_signal_days": n_signal_days, "reliable": reliable,
                 "trigger_score": trigger_score}
 
     def _metrics(self, ret: pd.Series) -> Dict:
@@ -3214,6 +3281,183 @@ class ReductionOptimizer:
         sharpe = (cagr - 0.025) / vol if vol > 0 else np.nan
         calmar = cagr / abs(max_dd) if max_dd != 0 else np.nan
         return {"cagr_pct": cagr * 100, "max_dd_pct": max_dd * 100, "sharpe": sharpe, "calmar": calmar}
+
+# =============================================================================
+# MODULE 31 : COUCHE PÉDAGOGIQUE — traduction en langage clair pour débutants
+# =============================================================================
+RISK_ENGINE_GLOSSARY = """
+**Comment lire cette page si vous découvrez l'outil :**
+
+- **SR (Score de Risque, 0 à 3)** : une note de "météo" pour chaque famille d'ETF.
+  0 = calme, 1 = à surveiller, 2 = alerte confirmée, 3 = stress fort.
+  Ce n'est PAS une prédiction, c'est un thermomètre basé sur des indicateurs passés.
+
+- **Persistance** : le signal doit se répéter plusieurs jours de suite avant d'être
+  pris au sérieux — comme un médecin qui reprend votre température plusieurs fois
+  avant de conclure à la fièvre, plutôt que sur une seule mesure.
+
+- **DQ (Qualité des Données, en %)** : indique si le score repose sur de vraies
+  données (100%) ou sur des approximations faute de mieux (parfois 45-60%).
+  Un score "2/3" avec DQ=45% mérite moins votre confiance qu'un score "2/3" avec DQ=100%.
+
+- **MDD futur (Max Drawdown)** : "si ce signal s'était déclenché par le passé,
+  quelle a été la pire baisse observée dans les jours/semaines suivants ?"
+  C'est une statistique du passé, pas une garantie pour l'avenir.
+
+- **EAL (perte évitée estimée)** : une estimation grossière de ce que la réduction
+  recommandée pourrait vous faire économiser, basée sur l'historique.
+
+- **Fiabilité statistique (n)** : le nombre de jours utilisés pour calculer une
+  statistique. En dessous de 30, considérez le chiffre comme indicatif seulement —
+  pas comme une preuve.
+"""
+
+def render_glossary_expander():
+    with st.expander("📖 Je découvre l'outil — comment tout lire en 2 minutes", expanded=False):
+        st.markdown(RISK_ENGINE_GLOSSARY)
+
+
+def pedagogic_verdict(key: str, confirmed_score: int, dq: float, reliable_history: bool) -> Dict:
+    """Traduit un score technique en verdict et consigne d'action en français simple,
+    sans jargon, pour quelqu'un qui n'a jamais utilisé l'outil."""
+    names = {"korea": "vos actions coréennes (MSCI Korea)",
+             "semi": "vos actions de semi-conducteurs",
+             "world": "l'ensemble du marché mondial",
+             "value": "le risque de crédit obligataire (World Value)"}
+    name = names.get(key, key)
+
+    if confirmed_score == 0:
+        verdict = {"emoji": "🟢", "color": "#22C55E",
+                   "title": "Rien à faire",
+                   "text": f"Selon nos indicateurs, {name} ne montre pas de signe de danger particulier "
+                           "en ce moment.",
+                   "action": "Vous n'avez aucune action à faire. Continuez à surveiller normalement."}
+    elif confirmed_score == 1:
+        verdict = {"emoji": "🔵", "color": "#3B82F6",
+                   "title": "Simple vigilance — pas d'action",
+                   "text": f"Un petit signal d'alerte est apparu sur {name}, mais il n'est pas encore "
+                           "assez fort ni confirmé pour justifier une action.",
+                   "action": "Ne vendez rien. Revenez consulter cette page dans quelques jours."}
+    elif confirmed_score == 2:
+        verdict = {"emoji": "🟠", "color": "#F97316",
+                   "title": "Signal confirmé — réduction suggérée",
+                   "text": f"Plusieurs indicateurs concordent pour signaler un risque accru sur {name}, "
+                           "et ce signal s'est répété assez de jours pour être pris au sérieux.",
+                   "action": "L'outil suggère de réduire cette position de 25%. Ce n'est pas une "
+                             "obligation — regardez aussi la section historique ci-dessous pour "
+                             "voir si, par le passé, ce type de signal a vraiment évité une perte."}
+    else:
+        verdict = {"emoji": "🔴", "color": "#FF3131",
+                   "title": "Stress fort — réduction plus marquée suggérée",
+                   "text": f"Le niveau d'alerte le plus élevé est atteint sur {name}. "
+                           "Plusieurs signaux graves concordent en même temps.",
+                   "action": "L'outil suggère de réduire cette position de 50%. Vérifiez la section "
+                             "historique pour savoir si ce type de signal a, par le passé, précédé "
+                             "des baisses significatives."}
+
+    caveats = []
+    if dq < 0.70:
+        caveats.append(f"⚠️ Ce score repose en partie sur des approximations (fiabilité des données : "
+                        f"{dq*100:.0f}%) — à prendre avec plus de recul que les autres.")
+    if not reliable_history:
+        caveats.append("⚠️ L'historique de suivi de ce signal est encore court — la confirmation "
+                        "par persistance n'a pas encore assez de recul pour être pleinement fiable.")
+    verdict["caveats"] = caveats
+    return verdict
+
+
+def render_pedagogic_card(key: str, label: str, d: Dict, weight_pct: float):
+    """Carte pédagogique complète : verdict en clair + les 3 chiffres qui comptent + réserves."""
+    v = pedagogic_verdict(key, d["confirmed_score"], d["dq"], d.get("enough_history", True))
+    reduction = d["reduction_pct"]
+    target_pct = weight_pct * (1 - reduction / 100)
+    st.markdown(f'''<div class="card" style="border-left:5px solid {v["color"]};">
+        <div style="font-size:1.1rem;font-weight:800;">{v["emoji"]} {label} — {v["title"]}</div>
+        <div style="margin-top:.5rem;font-size:.95rem;">{v["text"]}</div>
+        <div style="margin-top:.6rem;padding:.6rem;background:{v["color"]}18;border-radius:8px;">
+            💡 <b>Concrètement :</b> {v["action"]}
+        </div>
+        <div style="margin-top:.5rem;font-size:.82rem;color:#8892AA;">
+            Position actuelle : <b>{weight_pct:.1f}%</b> du portefeuille →
+            proposition : <b>{target_pct:.1f}%</b> ({"aucun changement" if reduction == 0 else f"-{reduction:.0f}%"})
+        </div>
+        {"".join(f'<div style="margin-top:.4rem;font-size:.8rem;color:#F97316;">{c}</div>' for c in v["caveats"])}
+    </div>''', unsafe_allow_html=True)
+
+
+def build_consolidated_verdict(nom: str, decision_result: Dict, target_weight: Dict,
+                                 risk_contribution_pct: Optional[float]) -> Dict:
+    """Fusionne DecisionEngine (macro/technique) + allocation cible (Markowitz) +
+    concentration du risque en UN SEUL verdict, sans qu'aucune section ne se
+    contredise silencieusement en haut vs en bas de page."""
+    reasons = []
+    severity = 0  # 0=rien, 1=surveiller, 2=réduire, 3=réduire fort
+
+    dec = decision_result.get("decision", "HOLD")
+    if dec in ("EXIT", "REDUCE_50"):
+        severity = max(severity, 3)
+        reasons.append("le signal de risque technique/macro est au niveau le plus élevé")
+    elif dec == "REDUCE_25":
+        severity = max(severity, 2)
+        reasons.append("le signal de risque technique/macro suggère une réduction")
+    elif dec == "WATCH":
+        severity = max(severity, 1)
+        reasons.append("un signal de vigilance technique est actif")
+
+    action = target_weight.get("action", "MAINTENIR")
+    delta_pct = abs(target_weight.get("delta_pct", 0))
+    if action == "RÉDUIRE" and delta_pct > 5:
+        severity = max(severity, 2)
+        reasons.append(f"la position est surpondérée de {delta_pct:.1f} points vs l'allocation optimale")
+
+    if risk_contribution_pct is not None and risk_contribution_pct > 40:
+        severity = max(severity, 2)
+        reasons.append(f"cette ligne concentre {risk_contribution_pct:.0f}% du risque total du portefeuille")
+
+    labels = {0: ("🟢", "#22C55E", "Conserver"), 1: ("🔵", "#3B82F6", "Surveiller"),
+              2: ("🟠", "#F97316", "Envisager de réduire"), 3: ("🔴", "#FF3131", "Réduire")}
+    emoji, color, title = labels[severity]
+
+    if not reasons:
+        reason_text = "aucun signal ne justifie un changement actuellement."
+    elif len(reasons) == 1:
+        reason_text = f"parce que {reasons[0]}."
+    else:
+        reason_text = "parce que " + ", ET ".join(reasons) + " — plusieurs signaux concordent."
+
+    amount_to_sell = None
+    if severity >= 2:
+        amount_to_sell = target_weight.get("delta_eur")
+
+    return {"nom": nom, "severity": severity, "emoji": emoji, "color": color, "title": title,
+            "reason_text": reason_text, "amount_to_sell": amount_to_sell,
+            "n_concordant_signals": len(reasons)}
+
+
+def render_consolidated_recommendations(ui: "StreamlitUI", ptf: Dict, decisions: List[Dict],
+                                          target_weights: Dict, rc_map: Dict):
+    """Remplace/complète le bandeau résumé : UNE recommandation par ETF, qui tient
+    compte de TOUT (risque macro, allocation, concentration) au lieu de trois avis
+    séparés qui peuvent se contredire visuellement."""
+    st.markdown("## 🧭 Ce que vous devriez faire, en une phrase par ETF")
+    st.caption("Cette section combine le signal de risque, l'écart à l'allocation optimale et la "
+               "concentration du risque en une seule recommandation, pour éviter les messages "
+               "contradictoires entre sections de l'application.")
+    verdicts = []
+    for d in decisions:
+        ticker = d["ticker"]
+        tw = target_weights.get(ticker, {})
+        rc_pct = rc_map.get(ticker, {}).get("rc_pct")
+        v = build_consolidated_verdict(d["nom"], d["decision"], tw, rc_pct)
+        verdicts.append(v)
+
+    for v in sorted(verdicts, key=lambda x: -x["severity"]):
+        amt_txt = f" (~{abs(v['amount_to_sell']):,.0f}€)" if v["amount_to_sell"] else ""
+        st.markdown(f'''<div style="border-left:5px solid {v["color"]};padding:.8rem 1.1rem;
+            background:{v["color"]}15;border-radius:8px;margin-bottom:.5rem;">
+            <b>{v["emoji"]} {v["nom"]} — {v["title"]}{amt_txt}</b><br>
+            <span style="font-size:.88rem;color:#CBD5E1;">{v["reason_text"]}</span>
+        </div>''', unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
 # MODULE 16 : STREAMLIT UI
@@ -4107,6 +4351,7 @@ class StreamlitUI:
             st.markdown(f"---\n## 📌 {nom} (`{ticker}`)")
             self._render_single_backtest(ticker)
 
+    # --- PATCH 4 : _render_single_backtest — pas de prédiction si Ridge invalidé ---
     def _render_single_backtest(self, ticker: str):
         with st.spinner(f"Construction des features pour {ticker}..."):
             feat = build_feature_frame(self.dm, ticker)
@@ -4133,10 +4378,16 @@ class StreamlitUI:
                 st.success("✅ Ridge apporte un gain mesurable vs la baseline.")
             else:
                 st.info("ℹ Pas de gain net vs la baseline — restez sur la baseline pour cet ETF.")
-            prod_model, scaler = model.fit_production_model(feat)
-            pred_today = model.predict_today(feat, prod_model, scaler)
-            if pred_today is not None:
-                st.markdown(f"**Alpha attendu à 20 jours : {pred_today*100:+.2f}%**")
+            if wf_result["ridge_better"]:
+                prod_model, scaler = model.fit_production_model(feat)
+                pred_today = model.predict_today(feat, prod_model, scaler)
+                if pred_today is not None:
+                    st.markdown(f"**Alpha attendu à 20 jours : {pred_today*100:+.2f}%**")
+                    st.caption("Ce chiffre vient du modèle Ridge, validé ci-dessus contre la baseline.")
+            else:
+                st.error("⛔ **Aucune prédiction affichée.** Le modèle ne bat pas la simple moyenne "
+                         "historique pour cet ETF (corrélation walk-forward négative ou nulle) — "
+                         "afficher un chiffre ici donnerait une fausse impression de précision.")
         else:
             st.warning(wf_result.get("reason", "Walk-forward indisponible."))
 
@@ -4404,6 +4655,8 @@ class StreamlitUI:
     # RISK ENGINE v7.1 — 3 vues : Scores en direct / Validation / Optimisation
     # =========================================================================
     def render_risk_engine_v71(self, ptf: Dict):
+        # PATCH 5 : glossaire en toute première ligne
+        render_glossary_expander()
         st.markdown("## 🛡 Risk Engine v7.1 — Scores en direct")
         st.caption("Chaque score est confirmé par une persistance spécifique à sa fréquence "
                    "(technique quotidien 3/5j, VIX 3/3j consécutives, crédit ~2 semaines).")
@@ -4436,41 +4689,47 @@ class StreamlitUI:
             d = result["per_etf"][key]
             score_color = {0: "#22C55E", 1: "#3B82F6", 2: "#F97316", 3: "#FF3131"}[d["confirmed_score"]]
             weight_pct = w_map.get(key, 0) * 100
-            reduction = d["reduction_pct"]
-            target_pct = weight_pct * (1 - reduction / 100)
-            to_sell_pct = weight_pct - target_pct
 
-            stats_df = _cached_conditional_stats(self.dm, key, cache_key)
-            hist_block = ""
-            if not stats_df.empty:
-                row = stats_df[(stats_df["score"] == d["confirmed_score"]) & (stats_df["horizon"] == 20)]
-                if not row.empty:
-                    r = row.iloc[0]
-                    hist_block = (f"<br><b>Historique SR={d['confirmed_score']}/3 (horizon 20j)</b> :<br>"
-                                  f"MDD médian : {r['mdd_median']*100:.2f}% · MDD P05 (pire 5%) : {r['mdd_p05']*100:.2f}%<br>"
-                                  f"P(MDD&lt;-5%) : {r['prob_mdd_lt_5']*100:.0f}% · "
-                                  f"P(MDD&lt;-10%) : {r['prob_mdd_lt_10']*100:.0f}% · n={int(r['n'])} jours<br>"
-                                  f"Perte évitée estimée (EAL) : {compute_eal(reduction, r['mdd_median']*100):.2f}%")
+            # PATCH 5 : carte pédagogique en langage clair AVANT le bloc technique
+            render_pedagogic_card(key, labels[key], d, weight_pct)
 
-            st.markdown(f'''<div class="card" style="border-left:4px solid {score_color};">
-                <div style="font-weight:700;font-size:1.05rem;">{labels[key]} — SR {d["confirmed_score"]}/3
-                    {"— Signal confirmé" if d["confirmed_score"] >= 2 else ""}</div>
-                <div style="margin-top:.4rem;">
-                    Exposition actuelle : <b>{weight_pct:.1f}%</b> ·
-                    Réduction recommandée : <b>{reduction:.0f}%</b> ·
-                    Exposition cible : <b>{target_pct:.1f}%</b> ·
-                    À désinvestir : <b>{to_sell_pct:.1f}%</b> du portefeuille
-                </div>
-                <div style="margin-top:.4rem;font-size:.82rem;color:#8892AA;">{hist_block}</div>
-                <div style="margin-top:.5rem;font-size:.78rem;color:#6B7585;">
-                    Qualité du signal (DQ) : <b>{d["dq"]*100:.0f}%</b> ·
-                    Persistance : {d["persistence_pct"]:.0f}% sur {d["persistence_window"]} séances
-                    (seuil {d["persistence_threshold_pct"]:.0f}%)
-                </div>
-            </div>''', unsafe_allow_html=True)
-            with st.expander("Détails techniques"):
+            # Bloc technique (replié dans un expander pour ceux qui veulent creuser)
+            with st.expander(f"🔬 Voir le détail technique — {labels[key]}"):
+                reduction = d["reduction_pct"]
+                target_pct = weight_pct * (1 - reduction / 100)
+                to_sell_pct = weight_pct - target_pct
+
+                stats_df = _cached_conditional_stats(self.dm, key, cache_key)
+                hist_block = ""
+                if not stats_df.empty:
+                    row = stats_df[(stats_df["score"] == d["confirmed_score"]) & (stats_df["horizon"] == 20)]
+                    if not row.empty:
+                        r = row.iloc[0]
+                        hist_block = (f"<br><b>Historique SR={d['confirmed_score']}/3 (horizon 20j)</b> :<br>"
+                                      f"MDD médian : {r['mdd_median']*100:.2f}% · MDD P05 (pire 5%) : {r['mdd_p05']*100:.2f}%<br>"
+                                      f"P(MDD&lt;-5%) : {r['prob_mdd_lt_5']*100:.0f}% · "
+                                      f"P(MDD&lt;-10%) : {r['prob_mdd_lt_10']*100:.0f}% · n={int(r['n'])} jours<br>"
+                                      f"Perte évitée estimée (EAL) : {compute_eal(reduction, r['mdd_median']*100):.2f}%")
+
+                st.markdown(f'''<div class="card" style="border-left:4px solid {score_color};">
+                    <div style="font-weight:700;font-size:1.05rem;">{labels[key]} — SR {d["confirmed_score"]}/3
+                        {"— Signal confirmé" if d["confirmed_score"] >= 2 else ""}</div>
+                    <div style="margin-top:.4rem;">
+                        Exposition actuelle : <b>{weight_pct:.1f}%</b> ·
+                        Réduction recommandée : <b>{reduction:.0f}%</b> ·
+                        Exposition cible : <b>{target_pct:.1f}%</b> ·
+                        À désinvestir : <b>{to_sell_pct:.1f}%</b> du portefeuille
+                    </div>
+                    <div style="margin-top:.4rem;font-size:.82rem;color:#8892AA;">{hist_block}</div>
+                    <div style="margin-top:.5rem;font-size:.78rem;color:#6B7585;">
+                        Qualité du signal (DQ) : <b>{d["dq"]*100:.0f}%</b> ·
+                        Persistance : {d["persistence_pct"]:.0f}% sur {d["persistence_window"]} séances
+                        (seuil {d["persistence_threshold_pct"]:.0f}%)
+                    </div>
+                </div>''', unsafe_allow_html=True)
                 st.json(d["details"])
 
+    # PATCH 2 : avertissement de fiabilité dans validation
     def render_risk_v71_validation(self):
         st.markdown("## 🧪 Validation historique complète")
         st.caption("Distribution complète (moyenne/médiane/quantiles/probabilités) des rendements "
@@ -4485,14 +4744,23 @@ class StreamlitUI:
                 st.warning(res.get("reason", "Indisponible"))
                 continue
             st.caption(f"{res['n_days']} jours analysés")
+
+            n_at_score2 = res["stats_numeric"][(res["stats_numeric"]["score"] == 2) &
+                                                (res["stats_numeric"]["horizon"] == 20)]
+            if not n_at_score2.empty and n_at_score2.iloc[0]["n"] < 30:
+                st.warning(f"⚠️ Seulement {int(n_at_score2.iloc[0]['n'])} observations historiques "
+                           f"pour SR=2/3 à 20 jours — les chiffres ci-dessous sont indicatifs, "
+                           "pas une preuve statistique robuste.")
+
             st.dataframe(res["stats_display"], use_container_width=True, hide_index=True)
 
         st.markdown("---")
         st.markdown('<div class="pedagogy-box"><b>Limitations données gratuites :</b><br>'
-                    '• Korea : proxy vol KRW/USD + ISM US (pas un ISM coréen) → DQ = 60%.<br>'
+                    '• Korea : proxy vol KRW/USD + commandes manufacturières US (AMTMNO) → DQ = 45%.<br>'
                     '• Semiconductor : breadth sur 20 valeurs proxy, pas la composition SOX officielle → DQ = 80%.<br>'
                     '• Historique limité à ~6 ans (HISTORICAL_DAYS=1500).</div>', unsafe_allow_html=True)
 
+    # PATCH 3 : affichage avec seuil minimal d'échantillon
     def render_risk_v71_optimizer(self, ptf: Dict):
         st.markdown("## 🎯 Optimisation de la réduction — 25%/50% sont-ils justifiés ?")
         st.caption("Teste chaque niveau de réduction contre l'historique réel et sélectionne "
@@ -4512,11 +4780,18 @@ class StreamlitUI:
                        f"Calmar {bh['calmar']:.2f}")
             best = res["best_reduction_by_calmar"]
             current = "25%"
-            if best != current:
+            if not res["reliable"]:
+                st.error(f"🔴 Seulement **{res['n_signal_days']} jours** où ce signal était actif sur "
+                         f"{res['n_days']} jours d'historique total. Ce n'est PAS assez pour tirer une "
+                         "conclusion fiable — le tableau ci-dessus reflète surtout le hasard de "
+                         "l'échantillon. Ne modifie pas ta stratégie sur cette base.")
+            elif best != current:
                 st.warning(f"⚠ Meilleur niveau historique par Calmar : **{best}** "
-                           f"(différent de la valeur actuellement codée en dur : {current})")
+                           f"(différent de la valeur actuellement codée en dur : {current}) — "
+                           f"basé sur {res['n_signal_days']} jours de signal, échantillon jugé suffisant.")
             else:
-                st.success(f"✅ Le niveau actuellement codé ({current}) est aussi le meilleur historiquement.")
+                st.success(f"✅ Le niveau actuellement codé ({current}) est aussi le meilleur historiquement "
+                           f"({res['n_signal_days']} jours de signal analysés).")
 
     def render_footer(self, mode_direct: bool, capital: float, score_em: int, regime_label: str, live_ok: int, live_total: int):
         st.markdown("---")
@@ -4896,6 +5171,16 @@ def main():
     with tab_dashboard:
         ui.render_header(mode_direct, live_ok, live_total)
         render_decision_summary_banner(decisions)
+        # PATCH 6 : recommandation consolidée unique
+        rc_map = {}
+        try:
+            tk_held = [p["ticker"] for p in ptf["positions"] if p.get("ticker") and p["valeur"] > 0]
+            w_held = [p["valeur"] for p in ptf["positions"] if p.get("ticker") and p["valeur"] > 0]
+            if len(tk_held) >= 2 and sum(w_held) > 0:
+                rc_map = qre.risk_contribution(tk_held, w_held, 60)
+        except Exception:
+            rc_map = {}
+        render_consolidated_recommendations(ui, ptf, decisions, target_weights, rc_map)
         ui.render_regime_banner(regime)
         for al in ld_alerts:
             gv, nom_al, sp, wp = al["gap"], al["nom"], al["sat_perf"], al["world_perf"]
