@@ -1,16 +1,15 @@
 # =============================================================================
-# COCKPIT DÉCISIONNEL BOURSIER v8.2 — STRATEGIC DECISION ENGINE
+# COCKPIT DÉCISIONNEL BOURSIER v8.3 — STRATEGIC DECISION ENGINE
 # =============================================================================
-# v8.2 : Réintégration ciblée de 7 fonctionnalités V7.3/V8 dans l'architecture
-#        poches de la 8.1 :
-#   • Bloc 1 : Leadership hebdomadaire par poche (Korea/Semi/Value vs World)
-#   • Bloc 2 : Widget d'arbitrage réactivé
-#   • Bloc 3 : Position Sizing reconstruit sur les poches
-#   • Bloc 4 : Graphique Risk Contribution
-#   • Bloc 5 : Jauge Poids Actuel vs Cible
-#   • Bloc 6 : Mini-graphique Performance Relative par poche
-#   • Simulateur fiscal France 2026 conservé (déjà complet en 8.1)
-#   • Markowitz par poches conservé (pas de retour aux ETF isolés)
+# v8.3 : Corrections ciblées sur V8.2 :
+#   1. Raison "Signaux non convergents" détaillée (compteurs explicites)
+#   2. Score Semiconductor vs World affiché en principal (score rattrapage vs Korea secondaire)
+#   3. Risk Contribution : verdict par poche concentrée (assumé vs candidat réduction)
+#   4. Section dédiée uniformisée : "Chaque poche active vs MSCI World"
+#   5. Position Sizing renormalisé pour atteindre 100%
+#   6. Dashboard réordonné + camembert répartition
+#   7. Carte satellite alignée sur le leadership hebdomadaire (fin des contradictions)
+#   8. Synthèse en pied de position sizing (ajustement le plus significatif)
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -49,7 +48,7 @@ try:
 except ImportError:
     SKLEARN_OK = False
 
-st.set_page_config(page_title="Cockpit v8.2", page_icon="🎯", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Cockpit v8.3", page_icon="🎯", layout="wide", initial_sidebar_state="expanded")
 
 # -----------------------------------------------------------------------------
 # MODULE 1 : CSS
@@ -117,9 +116,6 @@ UNDERPERF_THRESHOLDS = {"alpha20": -0.03, "alpha60": -0.02}
 DECISION_EXIT_SCORE = 5
 DECISION_REENTER_SCORE = 2
 
-# =============================================================================
-# V8 — CONFIGURATION STRATÉGIQUE DU PORTEFEUILLE
-# =============================================================================
 WORLD_CORE_TICKERS = ["DCAM.PA", "MWRD.PA"]
 WORLD_VALUE_TICKERS = ["WMMS.DE"]
 SATELLITE_TICKERS = ["KRW.PA", "CHIP.PA"]
@@ -1161,7 +1157,7 @@ class QuantRiskEngine:
         return float(np.sqrt(w @ cov @ w))
 
 # -----------------------------------------------------------------------------
-# MODULE 9bis : PORTFOLIO OPTIMIZER ENGINE (V8.2 — par poches)
+# MODULE 9bis : PORTFOLIO OPTIMIZER ENGINE
 # -----------------------------------------------------------------------------
 class PortfolioOptimizerEngine:
     def __init__(self, dm):
@@ -1180,8 +1176,6 @@ class PortfolioOptimizerEngine:
         mrc = cov @ w; rc = w * mrc
         return rc / port_var
     def _strategic_sleeve_returns(self, window: int = 252) -> Optional[pd.DataFrame]:
-        """Construit les rendements des POCHES économiques.
-        World PEA + World AV = une seule poche World Core."""
         result = {}
         world_candidates = ["MWRD.PA", "DCAM.PA", "CW8.PA", "IWDA.AS"]
         for ticker in world_candidates:
@@ -2081,7 +2075,7 @@ class DecisionEngine:
                 "note_risk": note_risk, "reasons": crash["reasons"] + underperf["reasons"]}
 
 # =============================================================================
-# MODULE 23bis : DÉCISIONS ETF (secondaires en V8.2)
+# MODULE 23bis : DÉCISIONS ETF
 # =============================================================================
 def build_decision_sentence(nom, ind, crash, underperf, decision):
     action_map = {"EXIT": "Sortir", "REDUCE_50": "Réduire 50%", "REDUCE_25": "Réduire 25%",
@@ -3052,6 +3046,7 @@ class SleeveAnalysisEngine:
                 "relative_performance": rel, "ratio": ratio_now, "above_sma20": above_sma20,
                 "above_sma60": above_sma60, "above_sma200": above_sma200,
                 "persistence_20d": persistence_20, "persistence_60d": persistence_60, "reasons": reasons}
+
     def analyze_semiconductor_thesis(self):
         krw = self.dm.data.get("KRW.PA", pd.DataFrame()); chip = self.dm.data.get("CHIP.PA", pd.DataFrame())
         if (krw is None or krw.empty or chip is None or chip.empty or "Close" not in krw.columns or "Close" not in chip.columns):
@@ -3107,16 +3102,22 @@ class SleeveAnalysisEngine:
             "THESIS_COMPLETED": "Rattrapage déjà effectué.",
             "NEUTRAL": "Pas de confirmation.",
         }
+        # CORRECTION 2 : score vs World (principal) en plus du score rattrapage vs Korea (secondaire)
+        world_score = 0
+        if gap["3m"] is not None: world_score += 1 if gap["3m"] > 0 else -1
+        if gap["6m"] is not None: world_score += 1 if gap["6m"] > 0 else -1
+        if gap["12m"] is not None: world_score += 1 if gap["12m"] > 0 else -1
+        world_regime = "SURPERFORME_WORLD" if world_score >= 1 else "SOUS_PERFORME_WORLD" if world_score <= -1 else "NEUTRE_WORLD"
         return {"available": True, "score": score, "thesis": thesis, "verdict": verdicts.get(thesis, ""),
                 "gap": gap, "ratio": ratio_now, "ratio_ret20": ratio_ret20, "ratio_ret60": ratio_ret60,
                 "ratio_above20": ratio_above20, "ratio_above60": ratio_above60, "ratio_above200": ratio_above200,
-                "persistence_20d": persistence_20, "persistence_60d": persistence_60, "reasons": reasons}
+                "persistence_20d": persistence_20, "persistence_60d": persistence_60, "reasons": reasons,
+                "world_score": world_score, "world_regime": world_regime}
 
 # =============================================================================
-# MODULE 32bis : ANALYSE SEMICONDUCTOR VS WORLD (Bloc 3 du patch)
+# MODULE 32bis : ANALYSE SEMICONDUCTOR VS WORLD
 # =============================================================================
 def compute_semiconductor_relative_analysis(semi_series, world_series, korea_series=None):
-    """Semiconductor → World (principal) + Korea (secondaire)."""
     result = {"benchmark_primary": "MSCI World", "benchmark_secondary": "Korea", "vs_world": {}, "vs_korea": {}}
     semi_series = semi_series.dropna(); world_series = world_series.dropna()
     common = semi_series.index.intersection(world_series.index)
@@ -3147,7 +3148,7 @@ def compute_semiconductor_relative_analysis(semi_series, world_series, korea_ser
     return result
 
 # =============================================================================
-# MODULE 32ter : STRATEGIC DECISION ENGINE V8
+# MODULE 32ter : STRATEGIC DECISION ENGINE
 # =============================================================================
 class StrategicDecisionEngine:
     def __init__(self, dm, sae): self.dm = dm; self.sae = sae
@@ -3255,8 +3256,12 @@ class StrategicDecisionEngine:
             action = "MAINTAIN_ACTIVE"; title = "Maintenir la stratégie active"
             reason = "Signaux de régime favorables."
         else:
+            # CORRECTION 1 : raison détaillée avec compteurs explicites
             action = "MAINTAIN"; title = "Aucune modification"
-            reason = "Signaux non convergents."
+            reason = (f"{positive_active} signal(aux) positif(s) et {negative_active} négatif(s) sur les 3 poches actives "
+                      f"— Value {value_score:+d}, Korea {korea_score:+d}, Semiconductor {semi_score:+d}. "
+                      f"Il faut au moins {MIN_CONFIRMATIONS} signaux positifs concordants pour justifier un renforcement : "
+                      f"ce seuil n'est pas atteint, donc aucun changement n'est déclenché.")
         exit_to_world = self.compute_exit_to_world_score(
             {"value": value, "korea": korea, "semiconductor": semiconductor}, benchmark_gap)
         return {"action": action, "title": title, "reason": reason,
@@ -3301,7 +3306,6 @@ def plot_weekly_leadership(labels, portfolio_perfs, world_perfs, portfolio_name=
                       legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5))
     return fig
 
-# BLOC 4 : Graphique Risk Contribution
 def plot_risk_contribution(rc) -> Optional[go.Figure]:
     if not rc: return None
     short = {"WMMS.DE": "WMMS", "MWRD.PA": "World", "DCAM.PA": "W-PEA", "KRW.PA": "Korea", "CHIP.PA": "CHIP"}
@@ -3318,7 +3322,6 @@ def plot_risk_contribution(rc) -> Optional[go.Figure]:
         xaxis=dict(gridcolor="#2E3340", ticksuffix="%"), yaxis=dict(gridcolor="rgba(0,0,0,0)"))
     return fig
 
-# BLOC 5 : Jauge Poids Actuel vs Cible
 def plot_weight_indicator(current_pct: float, target_pct: float) -> go.Figure:
     fig = go.Figure(go.Indicator(
         mode="gauge+number+delta", value=round(current_pct, 1),
@@ -3338,7 +3341,6 @@ def plot_weight_indicator(current_pct: float, target_pct: float) -> go.Figure:
         margin={"t": 50, "b": 10, "l": 20, "r": 20}, height=230)
     return fig
 
-# BLOC 6 : Mini-graphique Performance Relative
 def plot_relative_perf(dm, ticker, nom):
     world = get_world_series(dm, exclude_ticker=ticker)
     if world.empty: return None
@@ -3416,7 +3418,7 @@ class StreamlitUI:
     def _sign(v): return "+" if v >= 0 else ""
 
     def render_sidebar(self):
-        st.sidebar.markdown("## ⚙ Paramètres v8.2")
+        st.sidebar.markdown("## ⚙ Paramètres v8.3")
         mode_direct = st.sidebar.toggle("🔌 Mode Direct", value=False)
         st.sidebar.markdown("---")
         cap = st.sidebar.number_input("Capital investi (€)", value=st.session_state["cfg_capital_reel"], step=100.0, format="%.2f", key="input_capital_reel")
@@ -3485,7 +3487,7 @@ class StreamlitUI:
         now = datetime.now(ZoneInfo("Europe/Paris"))
         st.markdown('<div style="display:flex;align-items:baseline;gap:1rem;margin-bottom:.2rem;">'
                     '<span style="font-family:Space Mono;font-size:1.6rem;font-weight:700;color:#D4AF37;">◈</span>'
-                    '<span style="font-size:1.5rem;font-weight:700;color:#E2E8F0;">COCKPIT v8.2</span>'
+                    '<span style="font-size:1.5rem;font-weight:700;color:#E2E8F0;">COCKPIT v8.3</span>'
                     '<span style="font-family:Space Mono;font-size:.9rem;color:#6B7585;">STRATEGIC DECISION ENGINE</span></div>', unsafe_allow_html=True)
         c1, c2 = st.columns([3, 1])
         with c1: st.caption(f"Prix live · {now.strftime('%d/%m/%Y %H:%M:%S')} (Paris)")
@@ -3552,6 +3554,16 @@ class StreamlitUI:
                          "Valeur (€)": f"{p2['valeur']:,.2f}", "Perf. (%)": perf_f, "Perf. (€)": perf_euro_str, "Δ Jour (%)": vj_f})
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
+        # CORRECTION 6b : camembert répartition du portefeuille
+        st.markdown("### 🥧 Répartition du portefeuille")
+        vals = [p["valeur"] for p in ptf["positions"] if p.get("valeur", 0) > 0]
+        labels = [p["nom"] for p in ptf["positions"] if p.get("valeur", 0) > 0]
+        if vals:
+            fig_pie = go.Figure(go.Pie(labels=labels, values=vals, hole=0.55, textinfo="percent+label",
+                marker=dict(line=dict(color="#1C1F26", width=2))))
+            fig_pie.update_layout(**_PLOTLY_BASE, height=320, margin=dict(t=10, b=10, l=10, r=10), showlegend=False)
+            st.plotly_chart(fig_pie, use_container_width=True, config={"displayModeBar": False})
+
     def render_portfolio_leadership_comparison(self, ptf):
         st.markdown("## 📈 Performance du Portefeuille vs MSCI World")
         labels, port_perfs, world_perfs = self.pde.get_portfolio_weekly_performances(self.dm, ptf["positions"], n_weeks=5)
@@ -3564,8 +3576,7 @@ class StreamlitUI:
         verdict = self.pde.translate_leadership("Portefeuille", gaps)
         st.markdown(f'<div class="pedagogy-box"><b>{verdict["message"]}</b><br>{verdict["detail"]}<br>💡 {verdict["action"]}</div>', unsafe_allow_html=True)
 
-    # BLOC 1 : Leadership hebdomadaire par poche
-    def render_sleeve_leadership_comparison(self, nom: str, ticker_key: str, color_sat: str = "#D4AF37"):
+    def render_sleeve_leadership_comparison(self, nom, ticker_key, color_sat="#D4AF37"):
         st.markdown(f"### 📊 {nom} vs MSCI World — Leadership hebdomadaire")
         labels, sat_perfs, world_perfs = self.pde.get_weekly_performances(self.dm, ticker_key)
         if labels and sat_perfs and world_perfs:
@@ -3584,7 +3595,6 @@ class StreamlitUI:
                 verdict = self.pde.translate_leadership(nom, gaps)
                 st.markdown(f'<div class="pedagogy-box"><b>{verdict["message"]}</b><br>{verdict["detail"]}<br>'
                             f'💡 {verdict["action"]}</div>', unsafe_allow_html=True)
-            # BLOC 6 : mini-graphique performance relative
             fig_rel = plot_relative_perf(self.dm, ticker_key, nom)
             if fig_rel:
                 st.plotly_chart(fig_rel, use_container_width=True, config={"displayModeBar": False})
@@ -3665,14 +3675,12 @@ class StreamlitUI:
             if pd.notna(c) and c > 0.80:
                 st.warning(f"Korea et Semiconductor sont fortement corrélés ({c:.2f}) : "
                            "même complexe de risque au niveau du budget satellites.")
-        # BLOC 1 : Leadership hebdomadaire par poche
         st.markdown("---")
         st.markdown("### 📊 Leadership de chaque poche vs World")
         self.render_sleeve_leadership_comparison("World Value", "WMMS.DE", color_sat="#A855F7")
         self.render_sleeve_leadership_comparison("Korea", "KRW.PA", color_sat="#3B82F6")
         self.render_sleeve_leadership_comparison("Semiconductor", "CHIP.PA", color_sat="#F97316")
 
-    # BLOC 3 : Position Sizing par poche (avec _get_base_weight)
     def _get_base_weight(self, score: int, initial_target: float) -> float:
         if score >= 3: return initial_target
         elif score >= 1: return 0.20
@@ -3690,7 +3698,6 @@ class StreamlitUI:
         value = decision_result.get("value", {}) or {}
         korea = decision_result.get("korea", {}) or {}
         semi = decision_result.get("semiconductor", {}) or {}
-        rows = []
         specs = [
             ("WORLD_CORE", "🌍 World Core", None, STRATEGIC_TARGETS["world_core"]["neutral_min"]),
             ("WORLD_VALUE", "💎 World Value", value.get("score", 0), STRATEGIC_TARGETS["world_value"]["neutral_min"]),
@@ -3699,12 +3706,16 @@ class StreamlitUI:
              semi.get("score", 0) if semi.get("available") else 0,
              STRATEGIC_TARGETS["satellites"]["neutral_min"] / 2),
         ]
+        # CORRECTION 5 : renormalisation pour atteindre 100%
+        raw_targets = {}
+        for key, label, score, initial_target in specs:
+            raw_targets[key] = (STRATEGIC_TARGETS["world_core"]["neutral_min"] if key == "WORLD_CORE"
+                                 else self._get_base_weight(score, initial_target))
+        total_raw = sum(raw_targets.values()) or 1.0
+        rows = []
         for key, label, score, initial_target in specs:
             cur_pct = current_w.get(key, 0) * 100
-            if key == "WORLD_CORE":
-                target_pct = STRATEGIC_TARGETS["world_core"]["neutral_min"] * 100
-            else:
-                target_pct = self._get_base_weight(score, initial_target) * 100
+            target_pct = raw_targets[key] / total_raw * 100
             delta = cur_pct - target_pct
             action = "🔴 Réduire" if delta > 5 else "🟢 Renforcer" if delta < -5 else "⚪ Maintenir"
             rows.append({"Poche": label, "Score": score if score is not None else "—",
@@ -3714,13 +3725,18 @@ class StreamlitUI:
         sat_total = current_w.get("KOREA", 0) + current_w.get("SEMICONDUCTOR", 0)
         if sat_total > SATELLITE_MAX:
             st.warning(f"Budget satellites à {sat_total*100:.1f}% > plafond {SATELLITE_MAX*100:.0f}%.")
-        # BLOC 5 : jauge pour les satellites
         col_gauge, _ = st.columns([1, 2])
         with col_gauge:
             st.plotly_chart(plot_weight_indicator(sat_total * 100, SATELLITE_MAX * 100),
                             use_container_width=True, config={"displayModeBar": False})
+        # CORRECTION 8 : synthèse ajustement le plus significatif
+        try:
+            worst = max(rows, key=lambda r: abs(float(r["Écart"].rstrip('%'))))
+            st.info(f"🎯 En synthèse : l'ajustement le plus significatif concerne **{worst['Poche']}** "
+                    f"({worst['Écart']} vs cible) → {worst['Action']}.")
+        except Exception:
+            pass
 
-    # BLOC 2 : Widget d'arbitrage
     def render_arbitrage_widget(self):
         if "positions" not in st.session_state: return
         holdings = [p.get("_tk_id", p.get("ticker")) for p in st.session_state["positions"] if p.get("valeur", 0) > 0]
@@ -3756,8 +3772,10 @@ class StreamlitUI:
         if not sat_budget["valid"]:
             st.error(f"🚨 Budget satellites dépassé : {sat_budget['satellite_pct']*100:.1f}% "
                      f"(max {SATELLITE_MAX*100:.0f}%). Réduction : ~{sat_budget['excess_eur']:,.0f}€.")
+
         st.markdown("### 📊 État des moteurs")
         value = result["value"]; korea = result["korea"]; semi = result["semiconductor"]
+        # CORRECTION 2 : Semiconductor affiché en "vs World" (principal)
         rows = [
             {"Poche": "🌍 World Core", "Signal": "CORE", "Score": "—", "Régime": "Socle"},
             {"Poche": "💎 World Value", "Signal": "Value / World",
@@ -3765,13 +3783,15 @@ class StreamlitUI:
              "Régime": value.get("regime", "N/A")},
             {"Poche": "🇰🇷 Korea", "Signal": "Tactique", "Score": korea.get("score", 0),
              "Régime": korea.get("regime", "N/A")},
-            {"Poche": "🔬 Semiconductor", "Signal": "Rattrapage",
-             "Score": semi.get("score", 0) if semi.get("available") else "N/A",
-             "Régime": semi.get("thesis", "N/A")},
+            {"Poche": "🔬 Semiconductor", "Signal": "vs World (principal)",
+             "Score": semi.get("world_score", 0) if semi.get("available") else "N/A",
+             "Régime": semi.get("world_regime", "N/A")},
         ]
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.caption("Score = nombre d'horizons (3m/6m/12m) où la poche bat le World : de -3 (jamais) à +3 (toujours). "
+                   "Le rattrapage vs Korea (secondaire) reste visible dans 'Analyse des ETF Satellites'.")
 
-        # BLOC 4 : graphique Risk Contribution après le tableau "État des moteurs"
+        # BLOC 4 : graphique Risk Contribution + CORRECTION 3 : verdict par poche concentrée
         held = [p["ticker"] for p in ptf["positions"] if p.get("ticker") and p.get("valeur", 0) > 0]
         weights = [p["valeur"] / ptf["valeur_totale"] for p in ptf["positions"]
                    if p.get("ticker") in held]
@@ -3780,32 +3800,32 @@ class StreamlitUI:
             fig_rc = plot_risk_contribution(rc_map)
             if fig_rc:
                 st.plotly_chart(fig_rc, use_container_width=True, config={"displayModeBar": False})
+            # Verdict par ticker concentré
+            for tk, info in rc_map.items():
+                if info["flag"]:
+                    lbl = {"KRW.PA": "Korea", "CHIP.PA": "Semiconductor", "WMMS.DE": "World Value"}.get(tk, tk)
+                    sc = {"KRW.PA": korea.get("score", 0), "CHIP.PA": semi.get("world_score", 0),
+                          "WMMS.DE": value.get("score", 0)}.get(tk, 0)
+                    verdict = ("c'est aussi la poche au signal le plus favorable actuellement — risque concentré, mais assumé."
+                               if sc > 0 else "et son signal ne compense pas cette concentration — candidat naturel à une réduction.")
+                    st.warning(f"⚠️ {lbl} concentre {info['rc_pct']:.0f}% du risque (seuil 40%) — {verdict}")
 
-        # Référence stratégique Semi vs World (principal) + vs Korea (secondaire)
-        st.markdown("### 📊 Référence stratégique : Semiconductor vs MSCI World")
-        st.info("Le MSCI World est la référence principale. La comparaison Semiconductor vs Korea "
-                "est secondaire : elle permet de savoir si CHIP surperforme le risque Korea déjà présent.")
-        semi_series = self.dm.data.get("CHIP.PA", pd.DataFrame())
-        world_series = get_world_series(self.dm, exclude_ticker="CHIP.PA")
-        korea_series = self.dm.data.get("KRW.PA", pd.DataFrame())
-        if not semi_series.empty and "Close" in semi_series.columns:
-            semi_close = semi_series["Close"].dropna()
-            korea_close = korea_series["Close"].dropna() if not korea_series.empty and "Close" in korea_series.columns else None
-            semi_analysis = compute_semiconductor_relative_analysis(semi_close, world_series, korea_close)
-            vw = semi_analysis.get("vs_world", {}); vk = semi_analysis.get("vs_korea", {})
+        # CORRECTION 4 : Section uniformisée "chaque poche vs World"
+        st.markdown("### 📊 Chaque poche active vs MSCI World (référence unique)")
+        for label, tk in [("World Value", "WMMS.DE"), ("Korea", "KRW.PA"), ("Semiconductor", "CHIP.PA")]:
+            df_tk = self.dm.data.get(tk, pd.DataFrame())
+            if df_tk.empty or "Close" not in df_tk.columns: continue
+            ws = get_world_series(self.dm, exclude_ticker=tk)
+            analysis = compute_semiconductor_relative_analysis(df_tk["Close"].dropna(), ws)
+            vw = analysis.get("vs_world", {})
             if vw:
+                st.markdown(f"**{label} vs World**")
                 cols = st.columns(5)
-                for col, (label, val) in zip(cols, [("20j", vw.get("20d")), ("60j", vw.get("60d")),
-                                                     ("3m", vw.get("3m")), ("6m", vw.get("6m")), ("12m", vw.get("12m"))]):
-                    if val is not None and pd.notna(val):
-                        col.metric(f"CHIP vs World — {label}", f"{val * 100:+.2f} pts")
-            if vk:
-                st.markdown("#### ℹ️ Information secondaire : Semiconductor vs Korea")
-                cols = st.columns(5)
-                for col, (label, val) in zip(cols, [("20j", vk.get("20d")), ("60j", vk.get("60d")),
-                                                     ("3m", vk.get("3m")), ("6m", vk.get("6m")), ("12m", vk.get("12m"))]):
-                    if val is not None and pd.notna(val):
-                        col.metric(f"CHIP vs Korea — {label}", f"{val * 100:+.2f} pts")
+                for col, (h, val) in zip(cols, [("20j", vw.get("20d")), ("60j", vw.get("60d")),
+                                                 ("3m", vw.get("3m")), ("6m", vw.get("6m")), ("12m", vw.get("12m"))]):
+                    if val is not None and pd.notna(val): col.metric(h, f"{val*100:+.2f} pts")
+        st.info("MSCI World est la référence unique ci-dessus. Semiconductor vs Korea reste disponible, "
+                "à titre secondaire, dans 'Analyse des ETF Satellites'.")
 
         exit_info = result.get("exit_to_world", {})
         if exit_info:
@@ -3815,7 +3835,6 @@ class StreamlitUI:
             st.info(f"{exit_labels.get(exit_info.get('level'), exit_info.get('level'))} — Score {exit_info.get('score', 0)}/5")
             for reason in exit_info.get("reasons", []): st.write(f"• {reason}")
 
-        # BLOC 2 + BLOC 3 : arbitrage puis position sizing
         self.render_arbitrage_widget()
         self.render_position_sizing(ptf, result)
         return result
@@ -3858,11 +3877,20 @@ class StreamlitUI:
 
     def render_satellite_card_pedagogic(self, nom, ticker_key, unified, target_weight, regime, sent_rows, sector, gap_vs_world=None):
         color = {"korea": "#F97316", "chip": "#A855F7", "value": "#D4AF37"}.get(sector, "#D4AF37")
-        strat_full = self.se.compute(ticker_key, unified, regime); simple_score = self.pde.translate_simple_score(unified["total"])
+        # CORRECTION 7 : aligné sur le leadership hebdomadaire (fin des contradictions)
+        labels_w, perfs_w, world_w = self.pde.get_weekly_performances(self.dm, ticker_key)
+        if labels_w:
+            gaps_w = [p - w for p, w in zip(perfs_w, world_w)]
+            v = self.pde.translate_leadership(nom, gaps_w)
+            stars, lbl = {"green": ("⭐⭐⭐⭐⭐", "Sain"), "orange": ("⭐⭐⭐☆☆", "Vigilance"),
+                          "red": ("☆☆☆☆☆", "Dégradé")}.get(v["level"], ("⭐⭐⭐☆☆", "Neutre"))
+            detail = v.get("detail", "")
+        else:
+            stars, lbl, detail = "⭐⭐⭐☆☆", "Données insuffisantes", ""
         st.markdown(f'<div class="card" style="border-top:3px solid {color};">'
                     f'<div class="kpi-label">{nom}</div>'
-                    f'<div style="font-size:1.5rem;font-weight:700;">{simple_score["stars"]} {simple_score["label"]}</div>'
-                    f'<div style="font-size:.85rem;color:#8892AA;">{simple_score["explain"]}</div></div>', unsafe_allow_html=True)
+                    f'<div style="font-size:1.5rem;font-weight:700;">{stars} {lbl}</div>'
+                    f'<div style="font-size:.85rem;color:#8892AA;">{detail} — cohérent avec le Leadership hebdomadaire ci-dessus.</div></div>', unsafe_allow_html=True)
 
     def render_sentinelles_macro(self, ptf):
         st.markdown("## 🛰 Radar Sectoriel")
@@ -4132,7 +4160,7 @@ class StreamlitUI:
         with col_f1:
             mode_txt = "🔌 MODE DIRECT" if mode_direct else "Ajust. patrimonial actif"
             persist = "GitHub Gist + SQLite" if self.pm.status == "github" else "SQLite local"
-            st.caption(f"◈ Cockpit v8.2 · Strategic Decision Engine · {mode_txt} · Régime : {regime_label} · "
+            st.caption(f"◈ Cockpit v8.3 · Strategic Decision Engine · {mode_txt} · Régime : {regime_label} · "
                        f"Capital {capital:,.2f}€ · {persist} · {live_ok}/{live_total} prix live · "
                        "Benchmark : MWR Cash-Flow Adjusted · Outil personnel — Ne constitue pas un conseil en investissement")
         with col_f2:
@@ -4237,8 +4265,12 @@ def main():
     tab_dashboard, tab_transactions, tab_screener, tab_backtest, tab_risk_v71 = st.tabs(
         ["📊 Dashboard", "📈 Transactions", "🔍 Screener", "🧪 Backtest & Calibration", "🛡 Risk Engine v7.1"])
 
+    # CORRECTION 6a : dashboard réordonné (command center + leadership en premier)
     with tab_dashboard:
         ui.render_header(mode_direct, live_ok, live_total)
+        ui.render_command_center(ptf, bench, mode_direct, pm)
+        ui.render_portfolio_leadership_comparison(ptf)
+        st.markdown("---")
         render_glossary_expander(STRATEGIC_DECISION_GLOSSARY, title="📖 Comment lire la décision stratégique V8", expanded=False)
         strategic_decision = ui.render_strategic_decision(ptf, benchmark_gap=bench.get("gap"))
         ui.render_regime_banner(regime)
@@ -4246,8 +4278,6 @@ def main():
             gv, nom_al = al["gap"], al["nom"]; s = StreamlitUI._sign
             if gv < -5:
                 st.markdown(f'<div class="alert-box">🚨 <b>ALERTE : {nom_al}</b> — {abs(gv):.1f}% en retard sur le World sur 14 jours</div>', unsafe_allow_html=True)
-        ui.render_command_center(ptf, bench, mode_direct, pm)
-        ui.render_portfolio_leadership_comparison(ptf)
         ui.render_equity_curve_section(ptf, regime, positions_conf)
         ui.render_optimal_allocation_section(ptf)
         ui.render_sleeve_analysis(ptf)
