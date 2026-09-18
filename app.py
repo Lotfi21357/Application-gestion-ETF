@@ -10,6 +10,7 @@
 #   6. Dashboard réordonné + camembert répartition
 #   7. Carte satellite alignée sur le leadership hebdomadaire (fin des contradictions)
 #   8. Synthèse en pied de position sizing (ajustement le plus significatif)
+# v8.4 : Ajout courbe de performance du portefeuille + point haut
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -3102,7 +3103,6 @@ class SleeveAnalysisEngine:
             "THESIS_COMPLETED": "Rattrapage déjà effectué.",
             "NEUTRAL": "Pas de confirmation.",
         }
-        # CORRECTION 2 : score vs World (principal) en plus du score rattrapage vs Korea (secondaire)
         world_score = 0
         if gap["3m"] is not None: world_score += 1 if gap["3m"] > 0 else -1
         if gap["6m"] is not None: world_score += 1 if gap["6m"] > 0 else -1
@@ -3256,7 +3256,6 @@ class StrategicDecisionEngine:
             action = "MAINTAIN_ACTIVE"; title = "Maintenir la stratégie active"
             reason = "Signaux de régime favorables."
         else:
-            # CORRECTION 1 : raison détaillée avec compteurs explicites
             action = "MAINTAIN"; title = "Aucune modification"
             reason = (f"{positive_active} signal(aux) positif(s) et {negative_active} négatif(s) sur les 3 poches actives "
                       f"— Value {value_score:+d}, Korea {korea_score:+d}, Semiconductor {semi_score:+d}. "
@@ -3389,6 +3388,77 @@ def plot_equity_curve(history):
                              line=dict(color="#D4AF37", width=2.5), marker=dict(size=5), name="Capital"))
     fig.update_layout(**_PLOTLY_BASE, height=280, xaxis=dict(gridcolor="#2E3340"),
                       yaxis=dict(gridcolor="#2E3340", ticksuffix="€"))
+    return fig
+
+# =============================================================================
+# NOUVELLES FONCTIONS v8.4 — Courbe de performance + point haut
+# =============================================================================
+def compute_portfolio_peak(history, current_value=None):
+    """Point haut historique du capital (basé sur capital_cloture)."""
+    if history is None or history.empty or "capital_cloture" not in history.columns:
+        return None
+    df = history.copy()
+    df["date_dt"] = pd.to_datetime(df["date"], errors="coerce")
+    df["capital"] = pd.to_numeric(df["capital_cloture"], errors="coerce")
+    df = df.dropna(subset=["date_dt", "capital"]).sort_values("date_dt")
+    if df.empty:
+        return None
+    idx_peak = df["capital"].idxmax()
+    peak_capital = float(df.loc[idx_peak, "capital"])
+    peak_date = df.loc[idx_peak, "date_dt"]
+    capital_initial = float(df["capital"].iloc[0])
+    peak_gain = peak_capital - capital_initial
+    peak_perf = (peak_gain / capital_initial * 100) if capital_initial > 0 else None
+    if current_value is None:
+        current_value = float(df["capital"].iloc[-1])
+    current_value = float(current_value)
+    # Le point haut ne peut pas être inférieur à la valeur live actuelle
+    peak_capital = max(peak_capital, current_value)
+    if peak_capital == current_value:
+        peak_date = df["date_dt"].iloc[-1]  # sommet = aujourd'hui
+    distance_pct = (current_value / peak_capital - 1) * 100 if peak_capital > 0 else None
+    distance_eur = current_value - peak_capital
+    return {"date": peak_date, "capital": peak_capital, "gain": peak_gain,
+            "performance_pct": peak_perf, "current_value": current_value,
+            "distance_pct": distance_pct, "distance_eur": distance_eur}
+
+def plot_portfolio_performance_curve(history, current_value=None):
+    """Courbe de performance cumulée du portefeuille (%) basée sur capital_cloture."""
+    if history is None or history.empty or "capital_cloture" not in history.columns:
+        return None
+    df = history.dropna(subset=["capital_cloture"]).copy()
+    df["date_dt"] = pd.to_datetime(df["date"], errors="coerce")
+    df["capital"] = pd.to_numeric(df["capital_cloture"], errors="coerce")
+    df = df.dropna(subset=["date_dt", "capital"]).sort_values("date_dt").drop_duplicates("date_dt", keep="last")
+    if len(df) < 2:
+        return None
+    capital_initial = float(df["capital"].iloc[0])
+    if capital_initial <= 0:
+        return None
+    df["performance_pct"] = (df["capital"] / capital_initial - 1) * 100
+    df["peak_capital"] = df["capital"].cummax()
+    df["drawdown_pct"] = (df["capital"] / df["peak_capital"] - 1) * 100
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df["date_dt"], y=df["performance_pct"], mode="lines", name="Portefeuille",
+        line=dict(color="#D4AF37", width=2.5),
+        customdata=df[["capital", "performance_pct", "peak_capital", "drawdown_pct"]].values,
+        hovertemplate=("<b>%{x|%d/%m/%Y}</b><br>Capital : %{customdata[0]:,.2f}€<br>"
+                       "Performance : %{customdata[1]:+.2f}%<br>Point haut : %{customdata[2]:,.2f}€<br>"
+                       "Écart au point haut : %{customdata[3]:+.2f}%<extra></extra>")))
+    fig.add_hline(y=0, line_dash="dot", line_color="#6B7585", opacity=.7)
+    if current_value is not None:
+        current_perf = (float(current_value) / capital_initial - 1) * 100
+        fig.add_trace(go.Scatter(
+            x=[df["date_dt"].iloc[-1]], y=[current_perf], mode="markers", name="Aujourd'hui",
+            marker=dict(size=9, color="#FFFFFF", line=dict(color="#D4AF37", width=2)),
+            hovertemplate=f"<b>Aujourd'hui</b><br>Capital : {float(current_value):,.2f}€<br>Performance : {current_perf:+.2f}%<extra></extra>"))
+    fig.update_layout(**_PLOTLY_BASE, height=300, margin=dict(t=25, b=35, l=55, r=20),
+                      xaxis=dict(gridcolor="#2E3340", title=None),
+                      yaxis=dict(gridcolor="#2E3340", title="Performance cumulée", ticksuffix="%"),
+                      legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+                      hovermode="x unified")
     return fig
 
 def plot_correlation_heatmap(corr_df):
@@ -3541,6 +3611,28 @@ class StreamlitUI:
                 body_bench = f'<div class="kpi-value" style="color:{pbc};">{s(pb)}{pb:.2f}%</div>{pbj_html}{ls_html}'
             else: body_bench = '<div class="kpi-value">N/A</div>'
             st.markdown(f'<div class="card card-blue"><div class="kpi-label">MSCI World MWR<span class="mwr-badge">AJUSTÉ</span></div>{body_bench}</div>', unsafe_allow_html=True)
+
+        # =====================================================================
+        # NOUVEAU v8.4 : Courbe de performance du portefeuille + point haut
+        # =====================================================================
+        st.markdown("### 📈 Évolution de la performance du portefeuille")
+        history = self.pm.load_history()
+        fig_perf = plot_portfolio_performance_curve(history, current_value=ptf["valeur_totale"])
+        if fig_perf:
+            st.plotly_chart(fig_perf, use_container_width=True, config={"displayModeBar": False})
+            peak = compute_portfolio_peak(history, current_value=ptf["valeur_totale"])
+            if peak and peak["distance_pct"] is not None:
+                dp = peak["distance_pct"]
+                peak_color = "#22C55E" if dp >= -0.01 else ("#F97316" if dp > -5 else "#FF3131")
+                st.markdown(
+                    f'<div class="pedagogy-box">🏔 <b>Point haut :</b> {peak["date"].strftime("%d/%m/%Y")} · '
+                    f'{peak["capital"]:,.2f}€ · {peak["gain"]:+,.2f}€ ({peak["performance_pct"]:+.2f}%)<br>'
+                    f'📉 <b>Depuis le point haut :</b> '
+                    f'<span style="color:{peak_color};font-weight:700;">{dp:+.2f}%</span> '
+                    f'({peak["distance_eur"]:+,.2f}€)</div>', unsafe_allow_html=True)
+        else:
+            st.info("Historique insuffisant (il faut au moins 2 snapshots quotidiens) pour tracer la courbe de performance.")
+
         st.markdown("### 📊 Mes positions")
         rows = []
         for p2 in ptf["positions"]:
@@ -3554,7 +3646,7 @@ class StreamlitUI:
                          "Valeur (€)": f"{p2['valeur']:,.2f}", "Perf. (%)": perf_f, "Perf. (€)": perf_euro_str, "Δ Jour (%)": vj_f})
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-        # CORRECTION 6b : camembert répartition du portefeuille
+        # Camembert répartition du portefeuille
         st.markdown("### 🥧 Répartition du portefeuille")
         vals = [p["valeur"] for p in ptf["positions"] if p.get("valeur", 0) > 0]
         labels = [p["nom"] for p in ptf["positions"] if p.get("valeur", 0) > 0]
@@ -3706,7 +3798,6 @@ class StreamlitUI:
              semi.get("score", 0) if semi.get("available") else 0,
              STRATEGIC_TARGETS["satellites"]["neutral_min"] / 2),
         ]
-        # CORRECTION 5 : renormalisation pour atteindre 100%
         raw_targets = {}
         for key, label, score, initial_target in specs:
             raw_targets[key] = (STRATEGIC_TARGETS["world_core"]["neutral_min"] if key == "WORLD_CORE"
@@ -3729,7 +3820,6 @@ class StreamlitUI:
         with col_gauge:
             st.plotly_chart(plot_weight_indicator(sat_total * 100, SATELLITE_MAX * 100),
                             use_container_width=True, config={"displayModeBar": False})
-        # CORRECTION 8 : synthèse ajustement le plus significatif
         try:
             worst = max(rows, key=lambda r: abs(float(r["Écart"].rstrip('%'))))
             st.info(f"🎯 En synthèse : l'ajustement le plus significatif concerne **{worst['Poche']}** "
@@ -3775,7 +3865,6 @@ class StreamlitUI:
 
         st.markdown("### 📊 État des moteurs")
         value = result["value"]; korea = result["korea"]; semi = result["semiconductor"]
-        # CORRECTION 2 : Semiconductor affiché en "vs World" (principal)
         rows = [
             {"Poche": "🌍 World Core", "Signal": "CORE", "Score": "—", "Régime": "Socle"},
             {"Poche": "💎 World Value", "Signal": "Value / World",
@@ -3791,7 +3880,6 @@ class StreamlitUI:
         st.caption("Score = nombre d'horizons (3m/6m/12m) où la poche bat le World : de -3 (jamais) à +3 (toujours). "
                    "Le rattrapage vs Korea (secondaire) reste visible dans 'Analyse des ETF Satellites'.")
 
-        # BLOC 4 : graphique Risk Contribution + CORRECTION 3 : verdict par poche concentrée
         held = [p["ticker"] for p in ptf["positions"] if p.get("ticker") and p.get("valeur", 0) > 0]
         weights = [p["valeur"] / ptf["valeur_totale"] for p in ptf["positions"]
                    if p.get("ticker") in held]
@@ -3800,7 +3888,6 @@ class StreamlitUI:
             fig_rc = plot_risk_contribution(rc_map)
             if fig_rc:
                 st.plotly_chart(fig_rc, use_container_width=True, config={"displayModeBar": False})
-            # Verdict par ticker concentré
             for tk, info in rc_map.items():
                 if info["flag"]:
                     lbl = {"KRW.PA": "Korea", "CHIP.PA": "Semiconductor", "WMMS.DE": "World Value"}.get(tk, tk)
@@ -3810,7 +3897,6 @@ class StreamlitUI:
                                if sc > 0 else "et son signal ne compense pas cette concentration — candidat naturel à une réduction.")
                     st.warning(f"⚠️ {lbl} concentre {info['rc_pct']:.0f}% du risque (seuil 40%) — {verdict}")
 
-        # CORRECTION 4 : Section uniformisée "chaque poche vs World"
         st.markdown("### 📊 Chaque poche active vs MSCI World (référence unique)")
         for label, tk in [("World Value", "WMMS.DE"), ("Korea", "KRW.PA"), ("Semiconductor", "CHIP.PA")]:
             df_tk = self.dm.data.get(tk, pd.DataFrame())
@@ -3877,7 +3963,6 @@ class StreamlitUI:
 
     def render_satellite_card_pedagogic(self, nom, ticker_key, unified, target_weight, regime, sent_rows, sector, gap_vs_world=None):
         color = {"korea": "#F97316", "chip": "#A855F7", "value": "#D4AF37"}.get(sector, "#D4AF37")
-        # CORRECTION 7 : aligné sur le leadership hebdomadaire (fin des contradictions)
         labels_w, perfs_w, world_w = self.pde.get_weekly_performances(self.dm, ticker_key)
         if labels_w:
             gaps_w = [p - w for p, w in zip(perfs_w, world_w)]
@@ -4265,7 +4350,6 @@ def main():
     tab_dashboard, tab_transactions, tab_screener, tab_backtest, tab_risk_v71 = st.tabs(
         ["📊 Dashboard", "📈 Transactions", "🔍 Screener", "🧪 Backtest & Calibration", "🛡 Risk Engine v7.1"])
 
-    # CORRECTION 6a : dashboard réordonné (command center + leadership en premier)
     with tab_dashboard:
         ui.render_header(mode_direct, live_ok, live_total)
         ui.render_command_center(ptf, bench, mode_direct, pm)
