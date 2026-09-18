@@ -1,5 +1,5 @@
 # =============================================================================
-# COCKPIT DÉCISIONNEL BOURSIER v8.3 — STRATEGIC DECISION ENGINE
+# COCKPIT DÉCISIONNEL BOURSIER v8.4 — STRATEGIC DECISION ENGINE
 # =============================================================================
 # v8.3 : Corrections ciblées sur V8.2 :
 #   1. Raison "Signaux non convergents" détaillée (compteurs explicites)
@@ -11,6 +11,7 @@
 #   7. Carte satellite alignée sur le leadership hebdomadaire (fin des contradictions)
 #   8. Synthèse en pied de position sizing (ajustement le plus significatif)
 # v8.4 : Ajout courbe de performance du portefeuille + point haut
+#         + Sauvegarde automatique quotidienne d'un snapshot (aucun clic requis)
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -49,7 +50,7 @@ try:
 except ImportError:
     SKLEARN_OK = False
 
-st.set_page_config(page_title="Cockpit v8.3", page_icon="🎯", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Cockpit v8.4", page_icon="🎯", layout="wide", initial_sidebar_state="expanded")
 
 # -----------------------------------------------------------------------------
 # MODULE 1 : CSS
@@ -3488,7 +3489,7 @@ class StreamlitUI:
     def _sign(v): return "+" if v >= 0 else ""
 
     def render_sidebar(self):
-        st.sidebar.markdown("## ⚙ Paramètres v8.3")
+        st.sidebar.markdown("## ⚙ Paramètres v8.4")
         mode_direct = st.sidebar.toggle("🔌 Mode Direct", value=False)
         st.sidebar.markdown("---")
         cap = st.sidebar.number_input("Capital investi (€)", value=st.session_state["cfg_capital_reel"], step=100.0, format="%.2f", key="input_capital_reel")
@@ -3557,7 +3558,7 @@ class StreamlitUI:
         now = datetime.now(ZoneInfo("Europe/Paris"))
         st.markdown('<div style="display:flex;align-items:baseline;gap:1rem;margin-bottom:.2rem;">'
                     '<span style="font-family:Space Mono;font-size:1.6rem;font-weight:700;color:#D4AF37;">◈</span>'
-                    '<span style="font-size:1.5rem;font-weight:700;color:#E2E8F0;">COCKPIT v8.3</span>'
+                    '<span style="font-size:1.5rem;font-weight:700;color:#E2E8F0;">COCKPIT v8.4</span>'
                     '<span style="font-family:Space Mono;font-size:.9rem;color:#6B7585;">STRATEGIC DECISION ENGINE</span></div>', unsafe_allow_html=True)
         c1, c2 = st.columns([3, 1])
         with c1: st.caption(f"Prix live · {now.strftime('%d/%m/%Y %H:%M:%S')} (Paris)")
@@ -3613,7 +3614,7 @@ class StreamlitUI:
             st.markdown(f'<div class="card card-blue"><div class="kpi-label">MSCI World MWR<span class="mwr-badge">AJUSTÉ</span></div>{body_bench}</div>', unsafe_allow_html=True)
 
         # =====================================================================
-        # NOUVEAU v8.4 : Courbe de performance du portefeuille + point haut
+        # v8.4 : Courbe de performance du portefeuille + point haut
         # =====================================================================
         st.markdown("### 📈 Évolution de la performance du portefeuille")
         history = self.pm.load_history()
@@ -3631,7 +3632,8 @@ class StreamlitUI:
                     f'<span style="color:{peak_color};font-weight:700;">{dp:+.2f}%</span> '
                     f'({peak["distance_eur"]:+,.2f}€)</div>', unsafe_allow_html=True)
         else:
-            st.info("Historique insuffisant (il faut au moins 2 snapshots quotidiens) pour tracer la courbe de performance.")
+            st.info("Historique en cours de constitution (1 point par jour) — la courbe apparaîtra "
+                     "au bout de quelques jours d'utilisation de l'application.")
 
         st.markdown("### 📊 Mes positions")
         rows = []
@@ -4245,7 +4247,7 @@ class StreamlitUI:
         with col_f1:
             mode_txt = "🔌 MODE DIRECT" if mode_direct else "Ajust. patrimonial actif"
             persist = "GitHub Gist + SQLite" if self.pm.status == "github" else "SQLite local"
-            st.caption(f"◈ Cockpit v8.3 · Strategic Decision Engine · {mode_txt} · Régime : {regime_label} · "
+            st.caption(f"◈ Cockpit v8.4 · Strategic Decision Engine · {mode_txt} · Régime : {regime_label} · "
                        f"Capital {capital:,.2f}€ · {persist} · {live_ok}/{live_total} prix live · "
                        "Benchmark : MWR Cash-Flow Adjusted · Outil personnel — Ne constitue pas un conseil en investissement")
         with col_f2:
@@ -4310,6 +4312,27 @@ def main():
         ptf = pe.compute_portfolio(positions_conf, capital_reel, ajustement_pat, bonus_fortuneo)
         bench = pe.compute_benchmark(positions_conf, ptf["perf_tot_pct"])
         regime = mre.get_full_regime()
+
+        # =====================================================================
+        # v8.4 : SAUVEGARDE AUTOMATIQUE QUOTIDIENNE D'UN SNAPSHOT
+        # Aucun clic requis. Une seule écriture par jour (SQLite + Gist).
+        # =====================================================================
+        try:
+            today_str = datetime.now(ZoneInfo("Europe/Paris")).strftime("%Y-%m-%d")
+            last_snap = pm.get_last_snapshot()
+            if last_snap is None or last_snap.get("date") != today_str:
+                pm.save_snapshot(
+                    capital_cloture=ptf["valeur_totale"],
+                    valeur_titres=ptf["valeur_totale"],
+                    perf_jour=ptf["perf_j_pct"],
+                    perf_cumul=ptf["perf_tot_pct"],
+                    regime=regime["confirmed_label"],
+                    score_regime=regime["confirmed_score"],
+                    poids_sat=0.0,
+                )
+        except Exception:
+            pass
+
         held_tickers = [p["ticker"] for p in positions_conf if p.get("ticker") and p["parts"] > 0]
         yf_held = []
         for tk_id in held_tickers:
