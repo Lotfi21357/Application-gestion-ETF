@@ -12,6 +12,7 @@
 #   8. Synthèse en pied de position sizing (ajustement le plus significatif)
 # v8.4 : Ajout courbe de performance du portefeuille + point haut
 #         + Sauvegarde automatique quotidienne d'un snapshot (aucun clic requis)
+#         + Backfill rétroactif 14/08 → 17/09 (bouton one-shot sidebar)
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -875,6 +876,21 @@ class PersistenceManager:
             return True, ""
         except Exception as e:
             return False, f"{type(e).__name__}: {e}"
+
+    # -------------------------------------------------------------------------
+    # v8.4 : variante acceptant une date arbitraire (import rétroactif / backfill)
+    # -------------------------------------------------------------------------
+    def save_snapshot_at_date(self, date_str, capital_cloture, valeur_titres, perf_jour, perf_cumul, regime, score_regime, poids_sat):
+        try:
+            self._conn.execute("""INSERT OR REPLACE INTO snapshots
+            (date,capital_cloture,valeur_titres,perf_jour,perf_cumul,regime,score_regime,poids_sat) VALUES (?,?,?,?,?,?,?,?)""",
+            (date_str, round(capital_cloture, 2), round(valeur_titres, 2), round(perf_jour, 4), round(perf_cumul, 4), regime, score_regime, round(poids_sat, 4)))
+            self._conn.commit(); self._history_cache = None
+            if self._github_ok: self._push_to_github(self.load_history())
+            return True, ""
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"
+
     def load_history(self):
         if self._history_cache is not None: return self._history_cache
         try:
@@ -909,6 +925,38 @@ class PersistenceManager:
         return "local"
     @property
     def warning_msg(self): return self._github_warning
+
+# -----------------------------------------------------------------------------
+# v8.4 : DONNÉES DE BACKFILL 14/08 → 17/09 (reconstitution parts × prix historiques)
+# -----------------------------------------------------------------------------
+_BACKFILL_SNAPSHOTS = [
+    # date, capital_cloture, valeur_titres, perf_jour, perf_cumul, poids_sat
+    ("2026-08-14", 17195.08, 17195.08,  0.00,  0.00, 0.29),
+    ("2026-08-17", 17373.24, 17373.24,  1.04,  1.04, 0.30),
+    ("2026-08-18", 16882.53, 16882.53, -2.82, -1.82, 0.29),
+    ("2026-08-19", 16854.71, 16854.71, -0.16, -1.98, 0.28),
+    ("2026-08-20", 16832.22, 16832.22, -0.13, -2.11, 0.29),
+    ("2026-08-21", 16896.63, 16896.63,  0.38, -1.74, 0.29),
+    ("2026-08-24", 16736.63, 16736.63, -0.95, -2.67, 0.28),
+    ("2026-08-25", 16876.27, 16876.27,  0.83, -1.85, 0.29),
+    ("2026-08-26", 16906.27, 16906.27,  0.18, -1.68, 0.29),
+    ("2026-08-27", 17029.35, 17029.35,  0.73, -0.96, 0.29),
+    ("2026-08-28", 17157.89, 17157.89,  0.75, -0.22, 0.29),
+    ("2026-08-31", 16964.64, 16964.64, -1.13, -1.34, 0.29),
+    ("2026-09-01", 16919.56, 16919.56, -0.27, -1.60, 0.29),
+    ("2026-09-02", 16969.88, 16969.88,  0.30, -1.31, 0.29),
+    ("2026-09-03", 17051.91, 17051.91,  0.48, -0.83, 0.29),
+    ("2026-09-04", 17198.29, 17198.29,  0.86,  0.02, 0.29),
+    ("2026-09-07", 17289.08, 17289.08,  0.53,  0.55, 0.30),
+    ("2026-09-08", 17239.75, 17239.75, -0.29,  0.26, 0.30),
+    ("2026-09-09", 17102.81, 17102.81, -0.79, -0.54, 0.30),
+    ("2026-09-10", 16917.79, 16917.79, -1.08, -1.61, 0.30),
+    ("2026-09-11", 17113.57, 17113.57,  1.16, -0.47, 0.30),
+    ("2026-09-14", 16858.95, 16858.95, -1.49, -1.95, 0.29),
+    ("2026-09-15", 16792.32, 16792.32, -0.40, -2.34, 0.29),
+    ("2026-09-16", 16922.77, 16922.77,  0.78, -1.58, 0.29),
+    ("2026-09-17", 17116.92, 17116.92,  1.15, -0.45, 0.29),
+]
 
 # -----------------------------------------------------------------------------
 # MODULE 7 : PORTFOLIO CONFIG MANAGER & TRANSACTION ENGINE
@@ -3525,6 +3573,21 @@ class StreamlitUI:
                     meta = ETF_LIBRARY[chosen]
                     new_raw.append({"ticker": chosen, "parts": 0.0, "prm": 0.0, "account": meta.get("enveloppe", "AV")})
                     st.session_state["raw_positions"] = new_raw; self.pcm.save_positions(new_raw); st.rerun()
+        st.sidebar.markdown("---")
+
+        # =====================================================================
+        # v8.4 : bouton one-shot — import rétroactif 14/08 → 17/09
+        # =====================================================================
+        if not st.session_state.get("_backfill_done"):
+            if st.sidebar.button("⏮ Importer l'historique du 14/08 au 17/09", use_container_width=True):
+                n_ok = 0
+                for date_str, cap_bf, vt_bf, pj_bf, pc_bf, psat_bf in _BACKFILL_SNAPSHOTS:
+                    ok, _ = self.pm.save_snapshot_at_date(date_str, cap_bf, vt_bf, pj_bf, pc_bf, "Neutre", 0, psat_bf)
+                    if ok: n_ok += 1
+                st.session_state["_backfill_done"] = True
+                st.sidebar.success(f"✅ {n_ok}/{len(_BACKFILL_SNAPSHOTS)} jours importés")
+                st.rerun()
+
         st.sidebar.markdown("---")
         st.sidebar.markdown("### 🗑 Supprimer un ETF")
         current_positions = self.pcm.load_positions()
