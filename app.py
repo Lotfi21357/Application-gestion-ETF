@@ -13,6 +13,8 @@
 # v8.4 : Ajout courbe de performance du portefeuille + point haut
 #         + Sauvegarde automatique quotidienne d'un snapshot (aucun clic requis)
 #         + Backfill rétroactif 14/08 → 17/09 (bouton one-shot sidebar)
+#         + Sauvegarde / restauration manuelle CSV (filet de sécurité)
+#         + Persistance dans dossier ./data/ (survit aux redémarrages du conteneur)
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -425,10 +427,24 @@ DATE_DEBUT = datetime(2025, 9, 17)
 _DEFAULT_CAPITAL_REEL = 15023.05
 _DEFAULT_AJUSTEMENT_PAT = 0.0
 _DEFAULT_BONUS_FORTUNEO = 0.0
-_CONFIG_PATH = os.path.join(tempfile.gettempdir(), "cockpit_config_perso.json")
-_DB_PATH = os.path.join(tempfile.gettempdir(), "cockpit_local.db")
-_PORTFOLIO_JSON = os.path.join(tempfile.gettempdir(), "portfolio_positions.json")
-_TRANSACTIONS_JSON = os.path.join(tempfile.gettempdir(), "transactions.json")
+
+# =============================================================================
+# v8.4 : STOCKAGE PERSISTANT DANS ./data/ (survit aux redémarrages du conteneur)
+# Remplace les anciens chemins /tmp qui étaient effacés à chaque redémarrage.
+# =============================================================================
+_APP_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+_DATA_DIR = os.path.join(_APP_DIR, "data")
+try:
+    os.makedirs(_DATA_DIR, exist_ok=True)
+except Exception:
+    # Fallback si le dossier du script n'est pas inscriptible (Streamlit Cloud strict, etc.)
+    _DATA_DIR = tempfile.gettempdir()
+    os.makedirs(_DATA_DIR, exist_ok=True)
+
+_DB_PATH = os.path.join(_DATA_DIR, "cockpit_local.db")
+_CONFIG_PATH = os.path.join(_DATA_DIR, "cockpit_config_perso.json")
+_PORTFOLIO_JSON = os.path.join(_DATA_DIR, "portfolio_positions.json")
+_TRANSACTIONS_JSON = os.path.join(_DATA_DIR, "transactions.json")
 
 # -----------------------------------------------------------------------------
 # MODULE 3 : DATA MANAGER
@@ -878,7 +894,7 @@ class PersistenceManager:
             return False, f"{type(e).__name__}: {e}"
 
     # -------------------------------------------------------------------------
-    # v8.4 : variante acceptant une date arbitraire (import rétroactif / backfill)
+    # v8.4 : variante acceptant une date arbitraire (import rétroactif / backfill / restauration CSV)
     # -------------------------------------------------------------------------
     def save_snapshot_at_date(self, date_str, capital_cloture, valeur_titres, perf_jour, perf_cumul, regime, score_regime, poids_sat):
         try:
@@ -3588,6 +3604,35 @@ class StreamlitUI:
                 st.sidebar.success(f"✅ {n_ok}/{len(_BACKFILL_SNAPSHOTS)} jours importés")
                 st.rerun()
 
+        # =====================================================================
+        # v8.4 : sauvegarde / restauration manuelle CSV (filet de sécurité)
+        # =====================================================================
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("### 💾 Sauvegarde manuelle de l'historique")
+        history_export = self.pm.load_history()
+        if not history_export.empty:
+            csv_buf = io.StringIO()
+            history_export.to_csv(csv_buf, index=False)
+            st.sidebar.download_button(
+                "💾 Télécharger la sauvegarde (CSV)",
+                data=csv_buf.getvalue(),
+                file_name=f"cockpit_history_{datetime.now().strftime('%Y-%m-%d')}.csv",
+                mime="text/csv", use_container_width=True)
+        uploaded = st.sidebar.file_uploader("📤 Restaurer une sauvegarde", type="csv", key="restore_uploader")
+        if uploaded is not None:
+            if st.sidebar.button("✅ Confirmer la restauration", use_container_width=True):
+                df_restore = pd.read_csv(uploaded)
+                n_ok = 0
+                for _, row in df_restore.iterrows():
+                    ok, _ = self.pm.save_snapshot_at_date(
+                        str(row["date"]), float(row["capital_cloture"]), float(row["valeur_titres"]),
+                        float(row["perf_jour"]), float(row["perf_cumul"]),
+                        str(row.get("regime", "Neutre")), int(row.get("score_regime", 0) or 0),
+                        float(row.get("poids_sat", 0) or 0))
+                    if ok: n_ok += 1
+                st.sidebar.success(f"✅ {n_ok} jours restaurés")
+                st.rerun()
+
         st.sidebar.markdown("---")
         st.sidebar.markdown("### 🗑 Supprimer un ETF")
         current_positions = self.pcm.load_positions()
@@ -4309,7 +4354,7 @@ class StreamlitUI:
         col_f1, col_f2 = st.columns([4, 1])
         with col_f1:
             mode_txt = "🔌 MODE DIRECT" if mode_direct else "Ajust. patrimonial actif"
-            persist = "GitHub Gist + SQLite" if self.pm.status == "github" else "SQLite local"
+            persist = "GitHub Gist + SQLite" if self.pm.status == "github" else f"SQLite ({_DATA_DIR})"
             st.caption(f"◈ Cockpit v8.4 · Strategic Decision Engine · {mode_txt} · Régime : {regime_label} · "
                        f"Capital {capital:,.2f}€ · {persist} · {live_ok}/{live_total} prix live · "
                        "Benchmark : MWR Cash-Flow Adjusted · Outil personnel — Ne constitue pas un conseil en investissement")
