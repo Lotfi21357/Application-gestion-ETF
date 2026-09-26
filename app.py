@@ -20,6 +20,16 @@
 #         + Nouvel onglet "🧮 Analyse V6" : Exposition réelle (look-through),
 #           CUSUM Semi vs World, VaR/CVaR Monte Carlo, Stress tests par scénario,
 #           Corrélations conditionnelles & Beta Dimson
+# v8.5.1 : CORRECTION DÉFINITIVE portefeuille réel au 25/09/26
+#           - DCAM.PA : 508.0000 parts @ 4.9831  → 3 177,54 €
+#           - MWRD.PA : 24.6578 parts @ 141.616  → 3 993,58 €
+#           - WMMS.DE : 461.9561 parts @ 12.463  → 6 265,05 €
+#           - CHIP.PA : 33.8236 parts @ 95.854   → 3 969,20 €
+#           - KRW.PA supprimé (vendu le 24/09/26)
+#           Total : 17 405,37 € · Investi : 15 023,01 € · Gain : +2 382,36 € (+15,86 %)
+#           + Versioning portefeuille (CURRENT_PORTFOLIO_VERSION) pour forcer
+#             la réécriture quand on bascule de version
+#           + Bloc reset main() adapté (4 tickers requis + KRW.PA interdit)
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -937,6 +947,40 @@ class PersistenceManager:
         pj = (current_value / base - 1) * 100 if base > 0 else 0.0
         pc = (current_value / initial - 1) * 100 if initial > 0 else 0.0
         return pj, pc, base
+
+    # =========================================================================
+    # v8.5.1 : NOUVELLE MÉTHODE — purge ciblée d'un snapshot fautif
+    # Utilisée par la mini-commande Python pour supprimer le snapshot du 25/09
+    # qui fausse le chaînage daily performance (capital ~14 656 € au lieu de
+    # 17 405 €). Le prochain lancement recréera un snapshot propre avec les
+    # bonnes valeurs.
+    # =========================================================================
+    def delete_snapshot_at_date(self, date_str: str) -> Tuple[bool, str]:
+        """Supprime le snapshot correspondant à la date exacte (format YYYY-MM-DD)."""
+        try:
+            cur = self._conn.execute("DELETE FROM snapshots WHERE date = ?", (date_str,))
+            self._conn.commit()
+            self._history_cache = None
+            deleted = cur.rowcount
+            if self._github_ok: self._push_to_github(self.load_history())
+            if deleted == 0:
+                return False, f"Aucun snapshot trouvé pour {date_str}"
+            return True, f"Snapshot du {date_str} supprimé ({deleted} ligne)"
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"
+
+    def delete_snapshots_after(self, date_str: str) -> Tuple[bool, str]:
+        """Supprime tous les snapshots strictement postérieurs à la date donnée."""
+        try:
+            cur = self._conn.execute("DELETE FROM snapshots WHERE date > ?", (date_str,))
+            self._conn.commit()
+            self._history_cache = None
+            deleted = cur.rowcount
+            if self._github_ok: self._push_to_github(self.load_history())
+            return True, f"{deleted} snapshots supprimés après {date_str}"
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"
+
     @property
     def status(self):
         if self._github_ok: return "github"
@@ -983,38 +1027,73 @@ _BACKFILL_SNAPSHOTS = [
 # -----------------------------------------------------------------------------
 # MODULE 7 : PORTFOLIO CONFIG MANAGER & TRANSACTION ENGINE
 # -----------------------------------------------------------------------------
+# =============================================================================
+# v8.5.1 — CORRECTION DÉFINITIVE DU PORTEFEUILLE RÉEL AU 25/09/26
+# =============================================================================
+# Portefeuille après bascule du 24/09/26 :
+#   - KRW.PA (Korea) : VENDU intégralement
+#   - CHIP.PA (Semiconductor) : RENFORCÉ
+#   - MWRD.PA (World AV) : RENFORCÉ
+#   - WMMS.DE, DCAM.PA : parts inchangées
+#
+# Valeurs cibles (vérifiées le 25/09/26) :
+#   DCAM.PA : 508.0000 parts × 4.9831  =  3 177,54 €
+#   MWRD.PA :  24.6578 parts × 141.616 =  3 993,58 €
+#   WMMS.DE : 461.9561 parts × 12.463  =  6 265,05 €
+#   CHIP.PA :  33.8236 parts × 95.854  =  3 969,20 €
+#   ------------------------------------------------
+#   TOTAL PORTEFEUILLE                = 17 405,37 €
+#   INVESTI (capital de départ)       = 15 023,01 €
+#   GAIN RÉEL                         = +2 382,36 € (+15,86 %)
+# =============================================================================
+CURRENT_PORTFOLIO_VERSION = "v8.5_2026-09-25"
+
+# Parts + PRM exacts du portefeuille réel
+_REAL_POSITIONS = [
+    {"ticker": "DCAM.PA", "parts": 508.0000, "prm": 4.9831,  "account": "PEA"},
+    {"ticker": "MWRD.PA", "parts":  24.6578, "prm": 141.616, "account": "AV"},
+    {"ticker": "WMMS.DE", "parts": 461.9561, "prm": 12.463,  "account": "AV"},
+    {"ticker": "CHIP.PA", "parts":  33.8236, "prm": 95.854,  "account": "AV"},
+]
+
 class PortfolioConfigManager:
     def __init__(self, file_path=_PORTFOLIO_JSON): self.file_path = file_path
+
     def load_positions(self):
-        # v8.5 : nouveau portefeuille après bascule du 24/09/26 (Korea vendu, Semi renforcé)
-        # Parts = montant cible € / prix moyen estimé — PRM = prix de revient unitaire
-        # DCAM.PA : 3182,11€  → 508 parts (PRM 4,983)
-        # WMMS.DE : 3995,64€  → 295 parts (PRM ≈ 13,54)
-        # MWRD.PA : 6283,98€  → 42 parts (PRM ≈ 149,62)
-        # CHIP.PA : 3952,19€  → 38 parts (PRM ≈ 104,00)
-        default_positions = [
-            {"ticker": "DCAM.PA", "parts": 508.0000, "prm": 4.983, "account": "PEA"},
-            {"ticker": "WMMS.DE", "parts": 295.0000, "prm": 13.543, "account": "AV"},
-            {"ticker": "MWRD.PA", "parts": 42.0000, "prm": 149.619, "account": "AV"},
-            {"ticker": "CHIP.PA", "parts": 38.0000, "prm": 104.005, "account": "AV"},
-        ]
+        # v8.5.1 : portefeuille réel vérifié au 25/09/26 (Korea vendu, Semi renforcé)
+        default_positions = [dict(p) for p in _REAL_POSITIONS]
         try:
             if os.path.exists(self.file_path) and os.stat(self.file_path).st_size > 0:
-                with open(self.file_path, "r", encoding="utf-8") as f: data = json.load(f)
-                if isinstance(data, list) and data:
-                    existing = {pos["ticker"] for pos in data}
-                    for dp in default_positions:
-                        if dp["ticker"] not in existing: data.append(dp)
-                    # v8.5 : retirer KRW.PA si encore présent (position vendue)
-                    data = [p for p in data if p.get("ticker") != "KRW.PA"]
-                    return data
-        except Exception: pass
+                with open(self.file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                # Format v8.5.1 : dict avec version + positions
+                if isinstance(data, dict) and data.get("_version") == CURRENT_PORTFOLIO_VERSION:
+                    positions_data = data.get("positions", [])
+                    if positions_data:
+                        # Nettoie KRW.PA résiduel
+                        positions_data = [p for p in positions_data if p.get("ticker") != "KRW.PA"]
+                        # Vérifie que les 4 tickers sont bien présents
+                        existing = {p.get("ticker") for p in positions_data}
+                        required = {p["ticker"] for p in default_positions}
+                        if required.issubset(existing):
+                            return positions_data
+                # Ancien format (liste) ou version obsolète → écrasement avec le nouveau portefeuille
+                self.save_positions(default_positions)
+                return default_positions
+        except Exception:
+            pass
+        # Premier lancement ou fichier corrompu → on initialise
+        self.save_positions(default_positions)
         return default_positions
+
     def save_positions(self, positions):
         try:
-            with open(self.file_path, "w", encoding="utf-8") as f: json.dump(positions, f, indent=4, ensure_ascii=False)
+            payload = {"_version": CURRENT_PORTFOLIO_VERSION, "positions": positions}
+            with open(self.file_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=4, ensure_ascii=False)
             return True
-        except Exception: return False
+        except Exception:
+            return False
 
 class TransactionEngine:
     def __init__(self, file_path=_TRANSACTIONS_JSON): self.file_path = file_path
@@ -3365,7 +3444,7 @@ LOOKTHROUGH_WEIGHTS_IN_ETF = {
     "AVGO": {"semi": 10.53, "world": 1.70, "value": 0.0},
     "TSM":  {"semi": 12.72, "world": 0.0,  "value": 0.0},
     "AMD":  {"semi": 5.67,  "world": 0.0,  "value": 0.0},
-    "SKH":  {"semi": 4.74,  "world": 0.0,  "value": 0.0},   # SK Hynix — proxy mémoire/HBM (Korea sorti du portefeuille)
+    "SKH":  {"semi": 4.74,  "world": 0.0,  "value": 0.0},
     "ASML": {"semi": 4.26,  "world": 0.0,  "value": 0.0},
     "AAPL": {"semi": 0.0,   "world": 5.42, "value": 2.57},
     "MSFT": {"semi": 0.0,   "world": 3.84, "value": 1.88},
@@ -3437,14 +3516,12 @@ def render_exposure_section(ui, ptf):
         st.success("🟢 Concentration sous contrôle.")
 
 # =============================================================================
-# MODULE 32quinquies : CUSUM SEMICONDUCTOR vs WORLD (rupture de tendance relative)
+# MODULE 32quinquies : CUSUM SEMICONDUCTOR vs WORLD
 # =============================================================================
-CUSUM_THRESHOLD_PTS = 12.9  # seuil retenu dans l'audit V6 (23/09/26)
-CUSUM_WINDOW = 60           # jours de calcul glissant
+CUSUM_THRESHOLD_PTS = 12.9
+CUSUM_WINDOW = 60
 
 class CusumEngine:
-    """Calcule le CUSUM (somme cumulée) de l'écart de rendement quotidien
-    Semiconductor - World, pour détecter une rupture persistante."""
     def __init__(self, dm):
         self.dm = dm
     def compute(self, semi_ticker="CHIP.PA", window=CUSUM_WINDOW, threshold=CUSUM_THRESHOLD_PTS):
@@ -3506,16 +3583,14 @@ def render_cusum_section(ui):
     st.markdown(f'<div class="{box}">{res["level"]} {res["message"]}</div>', unsafe_allow_html=True)
 
 # =============================================================================
-# MODULE 32sexies : VaR / CVaR MONTE CARLO (régime normal + stress)
+# MODULE 32sexies : VaR / CVaR MONTE CARLO
 # =============================================================================
 MC_N_SIMULATIONS = 20000
 MC_HORIZONS = [1, 5, 20]
-MC_STRESS_THRESHOLD_SEMI = -1.0  # % — jours "stress" = jours où Semi <= -1%
+MC_STRESS_THRESHOLD_SEMI = -1.0
 MC_SEED = 42
 
 class MonteCarloRiskEngine:
-    """VaR/CVaR simulées par Monte Carlo, régime normal et régime de stress,
-    sur les 3 poches du portefeuille (World / World Value / Semiconductor)."""
     def __init__(self, dm):
         self.dm = dm
     def _sleeve_returns(self, window=252):
@@ -3611,15 +3686,13 @@ def render_montecarlo_section(ui, ptf):
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
 # =============================================================================
-# MODULE 32septies : STRESS TESTS PAR SCENARIO (chocs Semiconductor et macro)
+# MODULE 32septies : STRESS TESTS PAR SCENARIO
 # =============================================================================
 STRESS_SEMI_SCENARIOS = [-3, -5, -10, -15, -20]
 STRESS_UNIFORM_7_SCENARIOS = [-10, -20, -30, -40, -50]
 STRESS_MACRO_COMBO = {"semi_pct": -20, "us10y_bp": 75, "brent_pct": 20}
 
 class StressScenarioEngine:
-    """Impact d'un choc Semiconductor (et d'un choc macro combiné) sur le portefeuille,
-    à partir des bêtas historiques de World et World Value vis-à-vis de Semiconductor."""
     def __init__(self, dm, qre):
         self.dm = dm; self.qre = qre
     def _betas_vs_semi(self, window=240):
@@ -3645,8 +3718,6 @@ class StressScenarioEngine:
                          "Impact_Portefeuille_TOTAL_%": round(total, 3)})
         return {"available": True, "table": pd.DataFrame(rows), "beta_world_vs_semi": beta_world, "beta_value_vs_semi": beta_value}
     def uniform_7_shock_scenarios(self, ptf, scenarios=STRESS_UNIFORM_7_SCENARIOS):
-        """Choc uniforme appliqué aux 7 valeurs sous-jacentes, propagé via les poids look-through
-        définis dans LOOKTHROUGH_WEIGHTS_IN_ETF (module 32quater)."""
         vt = ptf["valeur_totale"]
         if vt <= 0: return {"available": False}
         w_semi = sum(p["valeur"] for p in ptf["positions"] if p.get("ticker") == "CHIP.PA") / vt
@@ -3663,7 +3734,6 @@ class StressScenarioEngine:
         return {"available": True, "table": pd.DataFrame(rows)}
     def macro_combo_scenario(self, ptf, semi_shock=STRESS_MACRO_COMBO["semi_pct"],
                               us10y_bp=STRESS_MACRO_COMBO["us10y_bp"], brent_pct=STRESS_MACRO_COMBO["brent_pct"]):
-        """Choc combiné — sensibilités additionnelles approximatives, pas une prévision."""
         semi_res = self.semi_shock_scenarios(ptf, scenarios=[semi_shock])
         if not semi_res.get("available"): return {"available": False}
         base_impact = semi_res["table"]["Impact_Portefeuille_TOTAL_%"].iloc[0]
@@ -3706,11 +3776,9 @@ def render_stress_scenarios_section(ui, ptf):
 # =============================================================================
 # MODULE 32octies : CORRELATIONS CONDITIONNELLES & BETA DIMSON
 # =============================================================================
-CONDITIONAL_CORR_THRESHOLD = -1.0  # % — jours "stress" = jours où Semi <= -1%
+CONDITIONAL_CORR_THRESHOLD = -1.0
 
 class ConditionalCorrelationEngine:
-    """Corrélations calculées uniquement sur les jours de stress (Semi <= seuil),
-    et bêta Dimson (2 jours) pour corriger l'asynchronisme de cotation Asie/Europe/US."""
     def __init__(self, dm):
         self.dm = dm
     def _returns_frame(self, tickers, window=252):
@@ -3731,7 +3799,6 @@ class ConditionalCorrelationEngine:
             return {"available": False, "reason": f"Seulement {len(stress_days)} jours de stress (<15)"}
         return {"available": True, "corr": stress_days[tickers].corr(), "n_days": len(stress_days)}
     def dimson_beta(self, ticker, benchmark_ticker="MWRD.PA", window=252):
-        """Bêta Dimson (somme des bêtas contemporain + retardé 1 jour)."""
         df_a = self.dm.data.get(ticker, pd.DataFrame())
         df_b = self.dm.data.get(benchmark_ticker, pd.DataFrame())
         if df_a.empty or df_b.empty or "Close" not in df_a.columns or "Close" not in df_b.columns:
@@ -3908,7 +3975,6 @@ def plot_equity_curve(history):
 # NOUVELLES FONCTIONS v8.4 — Courbe de performance + point haut
 # =============================================================================
 def compute_portfolio_peak(history, current_value=None):
-    """Point haut historique du capital (basé sur capital_cloture)."""
     if history is None or history.empty or "capital_cloture" not in history.columns:
         return None
     df = history.copy()
@@ -3936,7 +4002,6 @@ def compute_portfolio_peak(history, current_value=None):
             "distance_pct": distance_pct, "distance_eur": distance_eur}
 
 def plot_portfolio_performance_curve(history, current_value=None):
-    """Courbe de performance cumulée du portefeuille (%) basée sur capital_cloture."""
     if history is None or history.empty or "capital_cloture" not in history.columns:
         return None
     df = history.dropna(subset=["capital_cloture"]).copy()
@@ -4001,7 +4066,7 @@ class StreamlitUI:
     def _sign(v): return "+" if v >= 0 else ""
 
     def render_sidebar(self):
-        st.sidebar.markdown("## ⚙ Paramètres v8.5")
+        st.sidebar.markdown("## ⚙ Paramètres v8.5.1")
         mode_direct = st.sidebar.toggle("🔌 Mode Direct", value=False)
         st.sidebar.markdown("---")
         cap = st.sidebar.number_input("Capital investi (€)", value=st.session_state["cfg_capital_reel"], step=100.0, format="%.2f", key="input_capital_reel")
@@ -4048,6 +4113,31 @@ class StreamlitUI:
                 st.session_state["_backfill_done"] = True
                 st.sidebar.success(f"✅ {n_ok}/{len(_BACKFILL_SNAPSHOTS)} jours importés")
                 st.rerun()
+
+        # =====================================================================
+        # v8.5.1 : BOUTON DE PURGE DU SNAPSHOT FAUTIF (chaînage corrigé)
+        # =====================================================================
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("### 🩹 Corriger le chaînage")
+        st.sidebar.caption("Si le 'Chaîné' affiche un chiffre incohérent "
+                           "(snapshot créé avec l'ancien portefeuille), "
+                           "purgez-le ici.")
+        if st.sidebar.button("🗑 Purger snapshot du 25/09/2026", use_container_width=True):
+            ok, msg = self.pm.delete_snapshot_at_date("2026-09-25")
+            if ok:
+                st.sidebar.success(f"✅ {msg}")
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.sidebar.error(f"❌ {msg}")
+        if st.sidebar.button("🗑 Purger TOUS les snapshots après le 23/09", use_container_width=True):
+            ok, msg = self.pm.delete_snapshots_after("2026-09-23")
+            if ok:
+                st.sidebar.success(f"✅ {msg}")
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.sidebar.error(f"❌ {msg}")
 
         st.sidebar.markdown("---")
         st.sidebar.markdown("### 💾 Sauvegarde manuelle de l'historique")
@@ -4108,7 +4198,7 @@ class StreamlitUI:
         now = datetime.now(ZoneInfo("Europe/Paris"))
         st.markdown('<div style="display:flex;align-items:baseline;gap:1rem;margin-bottom:.2rem;">'
                     '<span style="font-family:Space Mono;font-size:1.6rem;font-weight:700;color:#D4AF37;">◈</span>'
-                    '<span style="font-size:1.5rem;font-weight:700;color:#E2E8F0;">COCKPIT v8.5</span>'
+                    '<span style="font-size:1.5rem;font-weight:700;color:#E2E8F0;">COCKPIT v8.5.1</span>'
                     '<span style="font-family:Space Mono;font-size:.9rem;color:#6B7585;">STRATEGIC DECISION ENGINE</span></div>', unsafe_allow_html=True)
         c1, c2 = st.columns([3, 1])
         with c1: st.caption(f"Prix live · {now.strftime('%d/%m/%Y %H:%M:%S')} (Paris)")
@@ -4782,7 +4872,7 @@ class StreamlitUI:
         with col_f1:
             mode_txt = "🔌 MODE DIRECT" if mode_direct else "Ajust. patrimonial actif"
             persist = "GitHub Gist + SQLite" if self.pm.status == "github" else f"SQLite ({_DATA_DIR})"
-            st.caption(f"◈ Cockpit v8.5 · Strategic Decision Engine · {mode_txt} · Régime : {regime_label} · "
+            st.caption(f"◈ Cockpit v8.5.1 · Strategic Decision Engine · {mode_txt} · Régime : {regime_label} · "
                        f"Capital {capital:,.2f}€ · {persist} · {live_ok}/{live_total} prix live · "
                        "Benchmark : MWR Cash-Flow Adjusted · Outil personnel — Ne constitue pas un conseil en investissement")
         with col_f2:
@@ -4817,17 +4907,18 @@ def _save_config(capital_reel, ajustement_pat, bonus_fortuneo):
 def main():
     pcm = PortfolioConfigManager(); raw = pcm.load_positions(); pcm.save_positions(raw)
     st.session_state["raw_positions"] = raw; st.session_state["positions"] = enrich_positions(raw)
-    # v8.5 : les 4 tickers requis après la bascule du 24/09/26 (Korea vendu)
+
+    # =========================================================================
+    # v8.5.1 : RESET AUTOMATIQUE — 4 tickers requis, KRW.PA INTERDIT
+    # =========================================================================
+    # Portefeuille réel au 25/09/26 : DCAM, MWRD, WMMS, CHIP (Korea vendu)
     tickers_in_positions = {pos["ticker"] for pos in st.session_state["positions"]}
     REQUIRED_TICKERS = {"DCAM.PA", "WMMS.DE", "MWRD.PA", "CHIP.PA"}
-    if not REQUIRED_TICKERS.issubset(tickers_in_positions):
-        st.error(f"❌ Position(s) manquante(s) : {REQUIRED_TICKERS - tickers_in_positions}. Réinitialisation forcée.")
-        default_positions = [
-            {"ticker": "DCAM.PA", "parts": 508.0000, "prm": 4.983, "account": "PEA"},
-            {"ticker": "WMMS.DE", "parts": 295.0000, "prm": 13.543, "account": "AV"},
-            {"ticker": "MWRD.PA", "parts": 42.0000, "prm": 149.619, "account": "AV"},
-            {"ticker": "CHIP.PA", "parts": 38.0000, "prm": 104.005, "account": "AV"},
-        ]
+    FORBIDDEN_TICKERS = {"KRW.PA"}
+    needs_reset = (not REQUIRED_TICKERS.issubset(tickers_in_positions)) or bool(FORBIDDEN_TICKERS & tickers_in_positions)
+    if needs_reset:
+        st.warning("🔄 Portefeuille mis à jour vers la version du 25/09/2026.")
+        default_positions = [dict(p) for p in _REAL_POSITIONS]
         pcm.save_positions(default_positions); st.session_state["raw_positions"] = default_positions
         st.session_state["positions"] = enrich_positions(default_positions); st.rerun()
     if "config_loaded" not in st.session_state:
