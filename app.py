@@ -1,5 +1,5 @@
 # =============================================================================
-# COCKPIT DÉCISIONNEL BOURSIER v8.4 — STRATEGIC DECISION ENGINE
+# COCKPIT DÉCISIONNEL BOURSIER v8.5 — STRATEGIC DECISION ENGINE
 # =============================================================================
 # v8.3 : Corrections ciblées sur V8.2 :
 #   1. Raison "Signaux non convergents" détaillée (compteurs explicites)
@@ -15,6 +15,21 @@
 #         + Backfill rétroactif 14/08 → 17/09 (bouton one-shot sidebar)
 #         + Sauvegarde / restauration manuelle CSV (filet de sécurité)
 #         + Persistance dans dossier ./data/ (survit aux redémarrages du conteneur)
+# v8.5 : Bascule portefeuille du 24/09/26 — Korea vendu, Semiconductor renforcé
+#         (4 lignes : DCAM.PA, WMMS.DE, MWRD.PA, CHIP.PA)
+#         + Nouvel onglet "🧮 Analyse V6" : Exposition réelle (look-through),
+#           CUSUM Semi vs World, VaR/CVaR Monte Carlo, Stress tests par scénario,
+#           Corrélations conditionnelles & Beta Dimson
+# v8.5.1 : CORRECTION DÉFINITIVE portefeuille réel au 25/09/26
+#           - DCAM.PA : 508.0000 parts @ 4.9831  → 3 177,54 €
+#           - MWRD.PA : 24.6578 parts @ 141.616  → 3 993,58 €
+#           - WMMS.DE : 461.9561 parts @ 12.463  → 6 265,05 €
+#           - CHIP.PA : 33.8236 parts @ 95.854   → 3 969,20 €
+#           - KRW.PA supprimé (vendu le 24/09/26)
+#           Total : 17 405,37 € · Investi : 15 023,01 € · Gain : +2 382,36 € (+15,86 %)
+#           + Versioning portefeuille (CURRENT_PORTFOLIO_VERSION) pour forcer
+#             la réécriture quand on bascule de version
+#           + Bloc reset main() adapté (4 tickers requis + KRW.PA interdit)
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -53,7 +68,7 @@ try:
 except ImportError:
     SKLEARN_OK = False
 
-st.set_page_config(page_title="Cockpit v8.4", page_icon="🎯", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Cockpit v8.5", page_icon="🎯", layout="wide", initial_sidebar_state="expanded")
 
 # -----------------------------------------------------------------------------
 # MODULE 1 : CSS
@@ -123,7 +138,8 @@ DECISION_REENTER_SCORE = 2
 
 WORLD_CORE_TICKERS = ["DCAM.PA", "MWRD.PA"]
 WORLD_VALUE_TICKERS = ["WMMS.DE"]
-SATELLITE_TICKERS = ["CHIP.PA"]  # Korea sorti le 24/09/26 — Semiconductor seul reste satellite
+# v8.5 : Korea sorti du portefeuille le 24/09/26 — Semiconductor seul reste satellite
+SATELLITE_TICKERS = ["CHIP.PA"]
 
 WORLD_CORE_MIN = 0.30
 WORLD_CORE_NEUTRAL_MIN = 0.33
@@ -424,12 +440,12 @@ SENTINELLES = {"Samsung": ["005930.KS"], "SK Hynix": ["000660.KS"], "TSMC": ["TS
 BENCHMARK_NOM = "MSCI World AV"
 DATE_DEBUT = datetime(2025, 9, 17)
 
-_DEFAULT_CAPITAL_REEL = 15023.05
+_DEFAULT_CAPITAL_REEL = 15023.01
 _DEFAULT_AJUSTEMENT_PAT = 0.0
 _DEFAULT_BONUS_FORTUNEO = 0.0
 
 # =============================================================================
-# v8.4 : STOCKAGE PERSISTANT DANS ./data/ (survit aux redémarrages du conteneur)
+# v8.4/v8.5 : STOCKAGE PERSISTANT DANS ./data/ (survit aux redémarrages du conteneur)
 # Remplace les anciens chemins /tmp qui étaient effacés à chaque redémarrage.
 # =============================================================================
 _APP_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
@@ -893,9 +909,6 @@ class PersistenceManager:
         except Exception as e:
             return False, f"{type(e).__name__}: {e}"
 
-    # -------------------------------------------------------------------------
-    # v8.4 : variante acceptant une date arbitraire (import rétroactif / backfill / restauration CSV)
-    # -------------------------------------------------------------------------
     def save_snapshot_at_date(self, date_str, capital_cloture, valeur_titres, perf_jour, perf_cumul, regime, score_regime, poids_sat):
         try:
             self._conn.execute("""INSERT OR REPLACE INTO snapshots
@@ -934,6 +947,40 @@ class PersistenceManager:
         pj = (current_value / base - 1) * 100 if base > 0 else 0.0
         pc = (current_value / initial - 1) * 100 if initial > 0 else 0.0
         return pj, pc, base
+
+    # =========================================================================
+    # v8.5.1 : NOUVELLE MÉTHODE — purge ciblée d'un snapshot fautif
+    # Utilisée par la mini-commande Python pour supprimer le snapshot du 25/09
+    # qui fausse le chaînage daily performance (capital ~14 656 € au lieu de
+    # 17 405 €). Le prochain lancement recréera un snapshot propre avec les
+    # bonnes valeurs.
+    # =========================================================================
+    def delete_snapshot_at_date(self, date_str: str) -> Tuple[bool, str]:
+        """Supprime le snapshot correspondant à la date exacte (format YYYY-MM-DD)."""
+        try:
+            cur = self._conn.execute("DELETE FROM snapshots WHERE date = ?", (date_str,))
+            self._conn.commit()
+            self._history_cache = None
+            deleted = cur.rowcount
+            if self._github_ok: self._push_to_github(self.load_history())
+            if deleted == 0:
+                return False, f"Aucun snapshot trouvé pour {date_str}"
+            return True, f"Snapshot du {date_str} supprimé ({deleted} ligne)"
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"
+
+    def delete_snapshots_after(self, date_str: str) -> Tuple[bool, str]:
+        """Supprime tous les snapshots strictement postérieurs à la date donnée."""
+        try:
+            cur = self._conn.execute("DELETE FROM snapshots WHERE date > ?", (date_str,))
+            self._conn.commit()
+            self._history_cache = None
+            deleted = cur.rowcount
+            if self._github_ok: self._push_to_github(self.load_history())
+            return True, f"{deleted} snapshots supprimés après {date_str}"
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"
+
     @property
     def status(self):
         if self._github_ok: return "github"
@@ -972,37 +1019,81 @@ _BACKFILL_SNAPSHOTS = [
     ("2026-09-15", 16792.32, 16792.32, -0.40, -2.34, 0.29),
     ("2026-09-16", 16922.77, 16922.77,  0.78, -1.58, 0.29),
     ("2026-09-17", 17116.92, 17116.92,  1.15, -0.45, 0.29),
-    ("2026-09-23", 17421.78, 17421.78,  0.00,  0.00, 0.29),
+    # v8.5 : bascule portefeuille — clôtures du 23/09 et 25/09 pour rattraper l'historique
+    ("2026-09-23", 17421.78, 17421.78,  0.00,  0.00, 0.228),
+    ("2026-09-25", 17405.37, 17405.37, -0.09, -0.09, 0.228),
 ]
 
 # -----------------------------------------------------------------------------
 # MODULE 7 : PORTFOLIO CONFIG MANAGER & TRANSACTION ENGINE
 # -----------------------------------------------------------------------------
+# =============================================================================
+# v8.5.1 — CORRECTION DÉFINITIVE DU PORTEFEUILLE RÉEL AU 25/09/26
+# =============================================================================
+# Portefeuille après bascule du 24/09/26 :
+#   - KRW.PA (Korea) : VENDU intégralement
+#   - CHIP.PA (Semiconductor) : RENFORCÉ
+#   - MWRD.PA (World AV) : RENFORCÉ
+#   - WMMS.DE, DCAM.PA : parts inchangées
+#
+# Valeurs cibles (vérifiées le 25/09/26) :
+#   DCAM.PA : 508.0000 parts × 4.9831  =  3 177,54 €
+#   MWRD.PA :  24.6578 parts × 141.616 =  3 993,58 €
+#   WMMS.DE : 461.9561 parts × 12.463  =  6 265,05 €
+#   CHIP.PA :  33.8236 parts × 95.854  =  3 969,20 €
+#   ------------------------------------------------
+#   TOTAL PORTEFEUILLE                = 17 405,37 €
+#   INVESTI (capital de départ)       = 15 023,01 €
+#   GAIN RÉEL                         = +2 382,36 € (+15,86 %)
+# =============================================================================
+CURRENT_PORTFOLIO_VERSION = "v8.5_2026-09-25"
+
+# Parts + PRM exacts du portefeuille réel
+_REAL_POSITIONS = [
+    {"ticker": "DCAM.PA", "parts": 508.0000, "prm": 4.9831,  "account": "PEA"},
+    {"ticker": "MWRD.PA", "parts":  24.6578, "prm": 141.616, "account": "AV"},
+    {"ticker": "WMMS.DE", "parts": 461.9561, "prm": 12.463,  "account": "AV"},
+    {"ticker": "CHIP.PA", "parts":  33.8236, "prm": 95.854,  "account": "AV"},
+]
+
 class PortfolioConfigManager:
     def __init__(self, file_path=_PORTFOLIO_JSON): self.file_path = file_path
+
     def load_positions(self):
-        # KRW.PA retiré le 24/09/26 (vendu) — ne réintroduire jamais Korea par défaut
-        default_positions = [
-            {"ticker": "DCAM.PA", "parts": 508.0000, "prm": 4.983, "account": "PEA"},
-            {"ticker": "WMMS.DE", "parts": 0.0, "prm": 0.0, "account": "AV"},
-            {"ticker": "MWRD.PA", "parts": 0.0, "prm": 0.0, "account": "AV"},
-            {"ticker": "CHIP.PA", "parts": 0.0, "prm": 0.0, "account": "AV"},
-        ]
+        # v8.5.1 : portefeuille réel vérifié au 25/09/26 (Korea vendu, Semi renforcé)
+        default_positions = [dict(p) for p in _REAL_POSITIONS]
         try:
             if os.path.exists(self.file_path) and os.stat(self.file_path).st_size > 0:
-                with open(self.file_path, "r", encoding="utf-8") as f: data = json.load(f)
-                if isinstance(data, list) and data:
-                    existing = {pos["ticker"] for pos in data}
-                    for dp in default_positions:
-                        if dp["ticker"] not in existing: data.append(dp)
-                    return data
-        except Exception: pass
+                with open(self.file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                # Format v8.5.1 : dict avec version + positions
+                if isinstance(data, dict) and data.get("_version") == CURRENT_PORTFOLIO_VERSION:
+                    positions_data = data.get("positions", [])
+                    if positions_data:
+                        # Nettoie KRW.PA résiduel
+                        positions_data = [p for p in positions_data if p.get("ticker") != "KRW.PA"]
+                        # Vérifie que les 4 tickers sont bien présents
+                        existing = {p.get("ticker") for p in positions_data}
+                        required = {p["ticker"] for p in default_positions}
+                        if required.issubset(existing):
+                            return positions_data
+                # Ancien format (liste) ou version obsolète → écrasement avec le nouveau portefeuille
+                self.save_positions(default_positions)
+                return default_positions
+        except Exception:
+            pass
+        # Premier lancement ou fichier corrompu → on initialise
+        self.save_positions(default_positions)
         return default_positions
+
     def save_positions(self, positions):
         try:
-            with open(self.file_path, "w", encoding="utf-8") as f: json.dump(positions, f, indent=4, ensure_ascii=False)
+            payload = {"_version": CURRENT_PORTFOLIO_VERSION, "positions": positions}
+            with open(self.file_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=4, ensure_ascii=False)
             return True
-        except Exception: return False
+        except Exception:
+            return False
 
 class TransactionEngine:
     def __init__(self, file_path=_TRANSACTIONS_JSON): self.file_path = file_path
@@ -2987,14 +3078,14 @@ OPTIMIZATION_SECTION_GLOSSARY = """
 SLEEVE_GLOSSARY = """
 **Pourquoi raisonner par "poche" et pas par ticker ?**
 
-L'optimiseur Markowitz voit N lignes. Il calcule DCAM/MWRD corrélés ~1.00 → redondants.
+L'optimiseur Markowitz voit 5 lignes. Il calcule DCAM/MWRD corrélés ~1.00 → redondants.
 Faux pour vous : DCAM dans PEA, MWRD dans AV.
 Deux enveloppes fiscales, un seul pari World.
 
-**Poches (depuis le 24/09/26 — sortie de Korea) :**
+**Poches :**
 - **World Core** (DCAM + MWRD) = socle
 - **World Value** (WMMS) = pari actif Value
-- **Satellites** (Semiconductor seul) = pari concentré plafonné à 35%
+- **Satellites** (Korea + CHIP) = paris concentrés plafonnés à 35%
 """
 
 STRATEGIC_DECISION_GLOSSARY = """
@@ -3022,7 +3113,7 @@ STRATEGIC_SLEEVES = {
     "world_value_tilt": {"label": "💎 Poche World Value", "tickers": WORLD_VALUE_TICKERS,
                          "explain": "Surpondération active du style Value."},
     "satellites_boost": {"label": "🚀 Poche Satellites", "tickers": SATELLITE_TICKERS,
-                         "explain": "Semiconductor — pari concentré plafonné à 35%."},
+                         "explain": "Paris concentrés plafonnés à 35%."},
 }
 
 def get_sleeve_of(ticker):
@@ -3044,12 +3135,12 @@ class SleeveAnalysisEngine:
             "world_value_tilt": {"label": "💎 World Value", "valeur": value_value, "pct": value_value / vt * 100,
                                  "tickers": WORLD_VALUE_TICKERS, "locked": False, "explain": "Surpondération Value."},
             "korea": {"label": "🇰🇷 Korea", "valeur": korea_value, "pct": korea_value / vt * 100,
-                      "tickers": ["KRW.PA"], "locked": False, "explain": "Vendu le 24/09/26 — reste à 0% tant qu'aucune part n'est détenue."},
+                      "tickers": ["KRW.PA"], "locked": False, "explain": "Satellite tactique."},
             "semiconductor": {"label": "🔬 Semiconductor", "valeur": semi_value, "pct": semi_value / vt * 100,
                               "tickers": ["CHIP.PA"], "locked": False, "explain": "Satellite tactique."},
             "satellites_boost": {"label": "🚀 Satellites", "valeur": korea_value + semi_value,
                                  "pct": (korea_value + semi_value) / vt * 100, "tickers": SATELLITE_TICKERS,
-                                 "locked": False, "explain": "Budget plafonné à 35% (Semiconductor seul depuis le 24/09/26)."},
+                                 "locked": False, "explain": "Budget plafonné à 35%."},
         }
     def analyze_world_value_tilt(self):
         world = get_world_series(self.dm); wmms = self.dm.data.get("WMMS.DE", pd.DataFrame())
@@ -3353,6 +3444,7 @@ LOOKTHROUGH_WEIGHTS_IN_ETF = {
     "AVGO": {"semi": 10.53, "world": 1.70, "value": 0.0},
     "TSM":  {"semi": 12.72, "world": 0.0,  "value": 0.0},
     "AMD":  {"semi": 5.67,  "world": 0.0,  "value": 0.0},
+    "SKH":  {"semi": 4.74,  "world": 0.0,  "value": 0.0},
     "ASML": {"semi": 4.26,  "world": 0.0,  "value": 0.0},
     "AAPL": {"semi": 0.0,   "world": 5.42, "value": 2.57},
     "MSFT": {"semi": 0.0,   "world": 3.84, "value": 1.88},
@@ -3424,14 +3516,12 @@ def render_exposure_section(ui, ptf):
         st.success("🟢 Concentration sous contrôle.")
 
 # =============================================================================
-# MODULE 32quinquies : CUSUM SEMICONDUCTOR vs WORLD (rupture de tendance relative)
+# MODULE 32quinquies : CUSUM SEMICONDUCTOR vs WORLD
 # =============================================================================
-CUSUM_THRESHOLD_PTS = 12.9  # seuil retenu dans l'audit V6 (23/09/26)
-CUSUM_WINDOW = 60           # jours de calcul glissant
+CUSUM_THRESHOLD_PTS = 12.9
+CUSUM_WINDOW = 60
 
 class CusumEngine:
-    """Calcule le CUSUM (somme cumulée) de l'écart de rendement quotidien
-    Semiconductor - World, pour détecter une rupture persistante."""
     def __init__(self, dm):
         self.dm = dm
     def compute(self, semi_ticker="CHIP.PA", window=CUSUM_WINDOW, threshold=CUSUM_THRESHOLD_PTS):
@@ -3493,16 +3583,14 @@ def render_cusum_section(ui):
     st.markdown(f'<div class="{box}">{res["level"]} {res["message"]}</div>', unsafe_allow_html=True)
 
 # =============================================================================
-# MODULE 32sexies : VaR / CVaR MONTE CARLO (régime normal + stress)
+# MODULE 32sexies : VaR / CVaR MONTE CARLO
 # =============================================================================
 MC_N_SIMULATIONS = 20000
 MC_HORIZONS = [1, 5, 20]
-MC_STRESS_THRESHOLD_SEMI = -1.0  # % — jours "stress" = jours où Semi <= -1%
+MC_STRESS_THRESHOLD_SEMI = -1.0
 MC_SEED = 42
 
 class MonteCarloRiskEngine:
-    """VaR/CVaR simulées par Monte Carlo, régime normal et régime de stress,
-    sur les 3 poches du portefeuille (World / World Value / Semiconductor)."""
     def __init__(self, dm):
         self.dm = dm
     def _sleeve_returns(self, window=252):
@@ -3598,15 +3686,13 @@ def render_montecarlo_section(ui, ptf):
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
 # =============================================================================
-# MODULE 32septies : STRESS TESTS PAR SCENARIO (chocs Semiconductor et macro)
+# MODULE 32septies : STRESS TESTS PAR SCENARIO
 # =============================================================================
 STRESS_SEMI_SCENARIOS = [-3, -5, -10, -15, -20]
 STRESS_UNIFORM_7_SCENARIOS = [-10, -20, -30, -40, -50]
 STRESS_MACRO_COMBO = {"semi_pct": -20, "us10y_bp": 75, "brent_pct": 20}
 
 class StressScenarioEngine:
-    """Impact d'un choc Semiconductor (et d'un choc macro combiné) sur le portefeuille,
-    à partir des bêtas historiques de World et World Value vis-à-vis de Semiconductor."""
     def __init__(self, dm, qre):
         self.dm = dm; self.qre = qre
     def _betas_vs_semi(self, window=240):
@@ -3632,8 +3718,6 @@ class StressScenarioEngine:
                          "Impact_Portefeuille_TOTAL_%": round(total, 3)})
         return {"available": True, "table": pd.DataFrame(rows), "beta_world_vs_semi": beta_world, "beta_value_vs_semi": beta_value}
     def uniform_7_shock_scenarios(self, ptf, scenarios=STRESS_UNIFORM_7_SCENARIOS):
-        """Choc uniforme appliqué aux valeurs sous-jacentes, propagé via les poids look-through
-        définis dans LOOKTHROUGH_WEIGHTS_IN_ETF (module 32quater)."""
         vt = ptf["valeur_totale"]
         if vt <= 0: return {"available": False}
         w_semi = sum(p["valeur"] for p in ptf["positions"] if p.get("ticker") == "CHIP.PA") / vt
@@ -3645,12 +3729,11 @@ class StressScenarioEngine:
             impact_world_pct = sum(w["world"] for w in LOOKTHROUGH_WEIGHTS_IN_ETF.values()) / 100 * shock
             impact_value_pct = sum(w["value"] for w in LOOKTHROUGH_WEIGHTS_IN_ETF.values()) / 100 * shock
             total = impact_semi_pct * w_semi + impact_world_pct * w_world + impact_value_pct * w_value
-            rows.append({"Choc_uniforme_sous_jacents_%": shock, "Impact_mecanique_Semi_%": round(impact_semi_pct, 2),
+            rows.append({"Choc_uniforme_7_valeurs_%": shock, "Impact_mecanique_Semi_%": round(impact_semi_pct, 2),
                          "Impact_Portefeuille_TOTAL_%": round(total, 3)})
         return {"available": True, "table": pd.DataFrame(rows)}
     def macro_combo_scenario(self, ptf, semi_shock=STRESS_MACRO_COMBO["semi_pct"],
                               us10y_bp=STRESS_MACRO_COMBO["us10y_bp"], brent_pct=STRESS_MACRO_COMBO["brent_pct"]):
-        """Choc combiné — sensibilités additionnelles approximatives, pas une prévision."""
         semi_res = self.semi_shock_scenarios(ptf, scenarios=[semi_shock])
         if not semi_res.get("available"): return {"available": False}
         base_impact = semi_res["table"]["Impact_Portefeuille_TOTAL_%"].iloc[0]
@@ -3671,7 +3754,7 @@ def render_stress_scenarios_section(ui, ptf):
         st.caption(f"Bêta World/Semi : {res1['beta_world_vs_semi']:.2f} · Bêta Value/Semi : {res1['beta_value_vs_semi']:.2f}")
     else:
         st.info("Données insuffisantes.")
-    st.markdown("### 2️⃣ Choc uniforme sur les sous-jacents")
+    st.markdown("### 2️⃣ Choc uniforme sur les 7 valeurs sous-jacentes")
     res2 = engine.uniform_7_shock_scenarios(ptf)
     if res2.get("available"):
         st.dataframe(res2["table"], use_container_width=True, hide_index=True)
@@ -3693,11 +3776,9 @@ def render_stress_scenarios_section(ui, ptf):
 # =============================================================================
 # MODULE 32octies : CORRELATIONS CONDITIONNELLES & BETA DIMSON
 # =============================================================================
-CONDITIONAL_CORR_THRESHOLD = -1.0  # % — jours "stress" = jours où Semi <= -1%
+CONDITIONAL_CORR_THRESHOLD = -1.0
 
 class ConditionalCorrelationEngine:
-    """Corrélations calculées uniquement sur les jours de stress (Semi <= seuil),
-    et bêta Dimson (2 jours) pour corriger l'asynchronisme de cotation Asie/Europe/US."""
     def __init__(self, dm):
         self.dm = dm
     def _returns_frame(self, tickers, window=252):
@@ -3718,7 +3799,6 @@ class ConditionalCorrelationEngine:
             return {"available": False, "reason": f"Seulement {len(stress_days)} jours de stress (<15)"}
         return {"available": True, "corr": stress_days[tickers].corr(), "n_days": len(stress_days)}
     def dimson_beta(self, ticker, benchmark_ticker="MWRD.PA", window=252):
-        """Bêta Dimson (somme des bêtas contemporain + retardé 1 jour)."""
         df_a = self.dm.data.get(ticker, pd.DataFrame())
         df_b = self.dm.data.get(benchmark_ticker, pd.DataFrame())
         if df_a.empty or df_b.empty or "Close" not in df_a.columns or "Close" not in df_b.columns:
@@ -3892,10 +3972,9 @@ def plot_equity_curve(history):
     return fig
 
 # =============================================================================
-# Courbe de performance + point haut (introduites en v8.4, conservées)
+# NOUVELLES FONCTIONS v8.4 — Courbe de performance + point haut
 # =============================================================================
 def compute_portfolio_peak(history, current_value=None):
-    """Point haut historique du capital (basé sur capital_cloture)."""
     if history is None or history.empty or "capital_cloture" not in history.columns:
         return None
     df = history.copy()
@@ -3913,10 +3992,9 @@ def compute_portfolio_peak(history, current_value=None):
     if current_value is None:
         current_value = float(df["capital"].iloc[-1])
     current_value = float(current_value)
-    # Le point haut ne peut pas être inférieur à la valeur live actuelle
     peak_capital = max(peak_capital, current_value)
     if peak_capital == current_value:
-        peak_date = df["date_dt"].iloc[-1]  # sommet = aujourd'hui
+        peak_date = df["date_dt"].iloc[-1]
     distance_pct = (current_value / peak_capital - 1) * 100 if peak_capital > 0 else None
     distance_eur = current_value - peak_capital
     return {"date": peak_date, "capital": peak_capital, "gain": peak_gain,
@@ -3924,9 +4002,6 @@ def compute_portfolio_peak(history, current_value=None):
             "distance_pct": distance_pct, "distance_eur": distance_eur}
 
 def plot_portfolio_performance_curve(history, current_value=None):
-    """Courbe de performance cumulée du portefeuille (%) basée sur capital_cloture.
-    Continue sur l'historique pré-24/09/26 (ancien portefeuille avec Korea) sans rupture,
-    car seul le capital total quotidien est stocké, jamais la composition."""
     if history is None or history.empty or "capital_cloture" not in history.columns:
         return None
     df = history.dropna(subset=["capital_cloture"]).copy()
@@ -3951,11 +4026,6 @@ def plot_portfolio_performance_curve(history, current_value=None):
                        "Performance : %{customdata[1]:+.2f}%<br>Point haut : %{customdata[2]:,.2f}€<br>"
                        "Écart au point haut : %{customdata[3]:+.2f}%<extra></extra>")))
     fig.add_hline(y=0, line_dash="dot", line_color="#6B7585", opacity=.7)
-    # Marqueur du 24/09/26 : bascule du portefeuille (sortie de Korea) — repère visuel uniquement
-    switch_date = pd.Timestamp("2026-09-24")
-    if df["date_dt"].min() <= switch_date <= df["date_dt"].max():
-        fig.add_vline(x=switch_date, line_dash="dot", line_color="#F97316", opacity=.6,
-                      annotation_text="Bascule portefeuille", annotation_font=dict(color="#F97316", size=9))
     if current_value is not None:
         current_perf = (float(current_value) / capital_initial - 1) * 100
         fig.add_trace(go.Scatter(
@@ -3996,7 +4066,7 @@ class StreamlitUI:
     def _sign(v): return "+" if v >= 0 else ""
 
     def render_sidebar(self):
-        st.sidebar.markdown("## ⚙ Paramètres v8.4")
+        st.sidebar.markdown("## ⚙ Paramètres v8.5.1")
         mode_direct = st.sidebar.toggle("🔌 Mode Direct", value=False)
         st.sidebar.markdown("---")
         cap = st.sidebar.number_input("Capital investi (€)", value=st.session_state["cfg_capital_reel"], step=100.0, format="%.2f", key="input_capital_reel")
@@ -4034,11 +4104,8 @@ class StreamlitUI:
                     st.session_state["raw_positions"] = new_raw; self.pcm.save_positions(new_raw); st.rerun()
         st.sidebar.markdown("---")
 
-        # =====================================================================
-        # v8.4 : bouton one-shot — import rétroactif 14/08 au 23/09 (avant bascule)
-        # =====================================================================
         if not st.session_state.get("_backfill_done"):
-            if st.sidebar.button("⏮ Importer l'historique du 14/08 au 23/09", use_container_width=True):
+            if st.sidebar.button("⏮ Importer l'historique du 14/08 au 25/09", use_container_width=True):
                 n_ok = 0
                 for date_str, cap_bf, vt_bf, pj_bf, pc_bf, psat_bf in _BACKFILL_SNAPSHOTS:
                     ok, _ = self.pm.save_snapshot_at_date(date_str, cap_bf, vt_bf, pj_bf, pc_bf, "Neutre", 0, psat_bf)
@@ -4048,8 +4115,30 @@ class StreamlitUI:
                 st.rerun()
 
         # =====================================================================
-        # v8.4 : sauvegarde / restauration manuelle CSV (filet de sécurité)
+        # v8.5.1 : BOUTON DE PURGE DU SNAPSHOT FAUTIF (chaînage corrigé)
         # =====================================================================
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("### 🩹 Corriger le chaînage")
+        st.sidebar.caption("Si le 'Chaîné' affiche un chiffre incohérent "
+                           "(snapshot créé avec l'ancien portefeuille), "
+                           "purgez-le ici.")
+        if st.sidebar.button("🗑 Purger snapshot du 25/09/2026", use_container_width=True):
+            ok, msg = self.pm.delete_snapshot_at_date("2026-09-25")
+            if ok:
+                st.sidebar.success(f"✅ {msg}")
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.sidebar.error(f"❌ {msg}")
+        if st.sidebar.button("🗑 Purger TOUS les snapshots après le 23/09", use_container_width=True):
+            ok, msg = self.pm.delete_snapshots_after("2026-09-23")
+            if ok:
+                st.sidebar.success(f"✅ {msg}")
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.sidebar.error(f"❌ {msg}")
+
         st.sidebar.markdown("---")
         st.sidebar.markdown("### 💾 Sauvegarde manuelle de l'historique")
         history_export = self.pm.load_history()
@@ -4109,7 +4198,7 @@ class StreamlitUI:
         now = datetime.now(ZoneInfo("Europe/Paris"))
         st.markdown('<div style="display:flex;align-items:baseline;gap:1rem;margin-bottom:.2rem;">'
                     '<span style="font-family:Space Mono;font-size:1.6rem;font-weight:700;color:#D4AF37;">◈</span>'
-                    '<span style="font-size:1.5rem;font-weight:700;color:#E2E8F0;">COCKPIT v8.4</span>'
+                    '<span style="font-size:1.5rem;font-weight:700;color:#E2E8F0;">COCKPIT v8.5.1</span>'
                     '<span style="font-family:Space Mono;font-size:.9rem;color:#6B7585;">STRATEGIC DECISION ENGINE</span></div>', unsafe_allow_html=True)
         c1, c2 = st.columns([3, 1])
         with c1: st.caption(f"Prix live · {now.strftime('%d/%m/%Y %H:%M:%S')} (Paris)")
@@ -4164,10 +4253,6 @@ class StreamlitUI:
             else: body_bench = '<div class="kpi-value">N/A</div>'
             st.markdown(f'<div class="card card-blue"><div class="kpi-label">MSCI World MWR<span class="mwr-badge">AJUSTÉ</span></div>{body_bench}</div>', unsafe_allow_html=True)
 
-        # =====================================================================
-        # v8.4 : Courbe de performance du portefeuille + point haut
-        # Continue depuis avant la bascule du 24/09/26 (seul le capital total est stocké)
-        # =====================================================================
         st.markdown("### 📈 Évolution de la performance du portefeuille")
         history = self.pm.load_history()
         fig_perf = plot_portfolio_performance_curve(history, current_value=ptf["valeur_totale"])
@@ -4200,7 +4285,6 @@ class StreamlitUI:
                          "Valeur (€)": f"{p2['valeur']:,.2f}", "Perf. (%)": perf_f, "Perf. (€)": perf_euro_str, "Δ Jour (%)": vj_f})
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-        # Camembert répartition du portefeuille
         st.markdown("### 🥧 Répartition du portefeuille")
         vals = [p["valeur"] for p in ptf["positions"] if p.get("valeur", 0) > 0]
         labels = [p["nom"] for p in ptf["positions"] if p.get("valeur", 0) > 0]
@@ -4309,18 +4393,12 @@ class StreamlitUI:
             sat = sleeves["satellites_boost"]; sat_budget = validate_satellite_budget(ptf)
             sat_color = "#FF3131" if not sat_budget["valid"] else "#22C55E"
             st.markdown(f'<div class="card" style="border-left:4px solid {sat_color};">'
-                        f'<div class="kpi-label">🚀 Satellites (Semiconductor depuis le 24/09/26)</div>'
+                        f'<div class="kpi-label">🚀 Satellites = Semiconductor</div>'
                         f'<div class="kpi-value" style="color:{sat_color};">{sat["pct"]:.1f}%</div>'
                         f'<div class="small">Plafond : {SATELLITE_MAX*100:.0f}%</div></div>', unsafe_allow_html=True)
             if not sat_budget["valid"]:
                 st.error(f"🚨 Budget satellites dépassé : {sat_budget['satellite_pct']*100:.1f}%. "
                          f"Réduction nécessaire : ~{sat_budget['excess_eur']:,.0f}€.")
-        corr_ks = self.qre.correlation_matrix(["KRW.PA", "CHIP.PA"], 60)
-        if corr_ks is not None and "KRW.PA" in corr_ks.columns and "CHIP.PA" in corr_ks.columns:
-            c = corr_ks.loc["KRW.PA", "CHIP.PA"]
-            if pd.notna(c) and c > 0.80:
-                st.warning(f"Korea et Semiconductor sont fortement corrélés ({c:.2f}) : "
-                           "même complexe de risque au niveau du budget satellites.")
         st.markdown("---")
         st.markdown("### 📊 Leadership de chaque poche vs World")
         self.render_sleeve_leadership_comparison("World Value", "WMMS.DE", color_sat="#A855F7")
@@ -4423,16 +4501,14 @@ class StreamlitUI:
             {"Poche": "💎 World Value", "Signal": "Value / World",
              "Score": value.get("score", 0) if value.get("available") else "N/A",
              "Régime": value.get("regime", "N/A")},
-            {"Poche": "🇰🇷 Korea", "Signal": "Tactique (0% — vendu le 24/09/26)", "Score": korea.get("score", 0),
-             "Régime": korea.get("regime", "N/A")},
+            {"Poche": "🇰🇷 Korea (sortie 24/09)", "Signal": "Historique — non détenu",
+             "Score": korea.get("score", 0), "Régime": korea.get("regime", "N/A")},
             {"Poche": "🔬 Semiconductor", "Signal": "vs World (principal)",
              "Score": semi.get("world_score", 0) if semi.get("available") else "N/A",
              "Régime": semi.get("world_regime", "N/A")},
         ]
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        st.caption("Score = nombre d'horizons (3m/6m/12m) où la poche bat le World : de -3 (jamais) à +3 (toujours). "
-                   "Korea reste calculé à titre informatif mais pèse 0% du portefeuille depuis le 24/09/26. "
-                   "Le rattrapage vs Korea (secondaire) reste visible dans 'Analyse des ETF Satellites'.")
+        st.caption("Score = nombre d'horizons (3m/6m/12m) où la poche bat le World : de -3 (jamais) à +3 (toujours).")
 
         held = [p["ticker"] for p in ptf["positions"] if p.get("ticker") and p.get("valeur", 0) > 0]
         weights = [p["valeur"] / ptf["valeur_totale"] for p in ptf["positions"]
@@ -4444,9 +4520,8 @@ class StreamlitUI:
                 st.plotly_chart(fig_rc, use_container_width=True, config={"displayModeBar": False})
             for tk, info in rc_map.items():
                 if info["flag"]:
-                    lbl = {"KRW.PA": "Korea", "CHIP.PA": "Semiconductor", "WMMS.DE": "World Value"}.get(tk, tk)
-                    sc = {"KRW.PA": korea.get("score", 0), "CHIP.PA": semi.get("world_score", 0),
-                          "WMMS.DE": value.get("score", 0)}.get(tk, 0)
+                    lbl = {"CHIP.PA": "Semiconductor", "WMMS.DE": "World Value"}.get(tk, tk)
+                    sc = {"CHIP.PA": semi.get("world_score", 0), "WMMS.DE": value.get("score", 0)}.get(tk, 0)
                     verdict = ("c'est aussi la poche au signal le plus favorable actuellement — risque concentré, mais assumé."
                                if sc > 0 else "et son signal ne compense pas cette concentration — candidat naturel à une réduction.")
                     st.warning(f"⚠️ {lbl} concentre {info['rc_pct']:.0f}% du risque (seuil 40%) — {verdict}")
@@ -4464,8 +4539,6 @@ class StreamlitUI:
                 for col, (h, val) in zip(cols, [("20j", vw.get("20d")), ("60j", vw.get("60d")),
                                                  ("3m", vw.get("3m")), ("6m", vw.get("6m")), ("12m", vw.get("12m"))]):
                     if val is not None and pd.notna(val): col.metric(h, f"{val*100:+.2f} pts")
-        st.info("MSCI World est la référence unique ci-dessus. Semiconductor vs Korea reste disponible, "
-                "à titre secondaire, dans 'Analyse des ETF Satellites'.")
 
         exit_info = result.get("exit_to_world", {})
         if exit_info:
@@ -4493,7 +4566,7 @@ class StreamlitUI:
     def render_risk_dashboard(self, ptf):
         st.markdown("## ⚠ Gestion des risques")
         risk_assets = [(p["ticker"], p["nom"], {"WMMS.DE": "#D4AF37", "DCAM.PA": "#007BFF", "MWRD.PA": "#3B82F6",
-                                                 "KRW.PA": "#F97316", "CHIP.PA": "#A855F7"}.get(p["ticker"], "#6366F1"))
+                                                 "CHIP.PA": "#A855F7"}.get(p["ticker"], "#6366F1"))
                        for p in ptf["positions"] if p.get("ticker") and p["valeur"] > 0]
         cols = st.columns(min(len(risk_assets), 4)) if risk_assets else []
         for i, (tk, name, color) in enumerate(risk_assets):
@@ -4739,19 +4812,17 @@ class StreamlitUI:
         c1.markdown(f'<div class="regime-banner" style="background:{result["regime_color"]}22;border:1px solid {result["regime_color"]};">'
                     f'🌐 RSG brut : <b>{result["rsg_raw"]:.2f}</b> — <b style="color:{result["regime_color"]};">{result["regime_label"]}</b></div>', unsafe_allow_html=True)
         c2.markdown(f'<div class="regime-banner regime-pending">⚖ RSG pondéré qualité : <b>{result["rsg_quality_weighted"]:.2f}</b></div>', unsafe_allow_html=True)
-        labels = {"korea": "🇰🇷 Korea", "semi": "💻 Semiconductor", "world": "🌍 World", "value": "💎 World Value"}
+        labels = {"korea": "🇰🇷 Korea (sortie)", "semi": "💻 Semiconductor", "world": "🌍 World", "value": "💎 World Value"}
         for key in ["korea", "semi", "world", "value"]:
             d = result["per_etf"][key]; weight_pct = w_map.get(key, 0) * 100
             score_color = {0: "#22C55E", 1: "#3B82F6", 2: "#F97316", 3: "#FF3131"}[d["confirmed_score"]]
-            extra_note = " (vendu le 24/09/26)" if key == "korea" else ""
             st.markdown(f'<div class="card" style="border-left:4px solid {score_color};">'
-                        f'<div style="font-weight:700;font-size:1.05rem;">{labels[key]}{extra_note} — SR {d["confirmed_score"]}/3</div>'
+                        f'<div style="font-weight:700;font-size:1.05rem;">{labels[key]} — SR {d["confirmed_score"]}/3</div>'
                         f'<div style="margin-top:.4rem;">Exposition : <b>{weight_pct:.1f}%</b> · Réduction : <b>{d["reduction_pct"]:.0f}%</b></div>'
                         f'<div style="margin-top:.3rem;font-size:.78rem;color:#6B7585;">DQ : <b>{d["dq"]*100:.0f}%</b> · Persistance : {d["persistence_pct"]:.0f}%</div></div>', unsafe_allow_html=True)
         st.caption("⚠️ Les pourcentages de réduction affichés sont des scénarios de gestion du risque, "
                    "pas des probabilités ni des recommandations mathématiquement certaines. Leur pertinence "
-                   "doit être vérifiée dans « Validation historique » et « Optimisation de la réduction ». "
-                   "Korea est conservé à titre de veille (exposition à 0% tant qu'aucune part n'est rachetée).")
+                   "doit être vérifiée dans « Validation historique » et « Optimisation de la réduction ».")
 
     def render_risk_v71_validation(self):
         st.markdown("## 🧪 Validation historique")
@@ -4801,7 +4872,7 @@ class StreamlitUI:
         with col_f1:
             mode_txt = "🔌 MODE DIRECT" if mode_direct else "Ajust. patrimonial actif"
             persist = "GitHub Gist + SQLite" if self.pm.status == "github" else f"SQLite ({_DATA_DIR})"
-            st.caption(f"◈ Cockpit v8.4 · Strategic Decision Engine · {mode_txt} · Régime : {regime_label} · "
+            st.caption(f"◈ Cockpit v8.5.1 · Strategic Decision Engine · {mode_txt} · Régime : {regime_label} · "
                        f"Capital {capital:,.2f}€ · {persist} · {live_ok}/{live_total} prix live · "
                        "Benchmark : MWR Cash-Flow Adjusted · Outil personnel — Ne constitue pas un conseil en investissement")
         with col_f2:
@@ -4838,19 +4909,16 @@ def main():
     st.session_state["raw_positions"] = raw; st.session_state["positions"] = enrich_positions(raw)
 
     # =========================================================================
-    # v9.0 : KRW.PA vendu le 24/09/26 — on n'exige plus sa présence.
-    # Les positions désormais obligatoires sont DCAM.PA, WMMS.DE, MWRD.PA, CHIP.PA.
+    # v8.5.1 : RESET AUTOMATIQUE — 4 tickers requis, KRW.PA INTERDIT
     # =========================================================================
+    # Portefeuille réel au 25/09/26 : DCAM, MWRD, WMMS, CHIP (Korea vendu)
     tickers_in_positions = {pos["ticker"] for pos in st.session_state["positions"]}
     REQUIRED_TICKERS = {"DCAM.PA", "WMMS.DE", "MWRD.PA", "CHIP.PA"}
-    if not REQUIRED_TICKERS.issubset(tickers_in_positions):
-        st.error(f"❌ Position(s) manquante(s) : {REQUIRED_TICKERS - tickers_in_positions}. Réinitialisation forcée.")
-        default_positions = [
-            {"ticker": "DCAM.PA", "parts": 508.0000, "prm": 4.983, "account": "PEA"},
-            {"ticker": "WMMS.DE", "parts": 0.0, "prm": 0.0, "account": "AV"},
-            {"ticker": "MWRD.PA", "parts": 0.0, "prm": 0.0, "account": "AV"},
-            {"ticker": "CHIP.PA", "parts": 0.0, "prm": 0.0, "account": "AV"},
-        ]
+    FORBIDDEN_TICKERS = {"KRW.PA"}
+    needs_reset = (not REQUIRED_TICKERS.issubset(tickers_in_positions)) or bool(FORBIDDEN_TICKERS & tickers_in_positions)
+    if needs_reset:
+        st.warning("🔄 Portefeuille mis à jour vers la version du 25/09/2026.")
+        default_positions = [dict(p) for p in _REAL_POSITIONS]
         pcm.save_positions(default_positions); st.session_state["raw_positions"] = default_positions
         st.session_state["positions"] = enrich_positions(default_positions); st.rerun()
     if "config_loaded" not in st.session_state:
@@ -4872,12 +4940,7 @@ def main():
         bench = pe.compute_benchmark(positions_conf, ptf["perf_tot_pct"])
         regime = mre.get_full_regime()
 
-        # =====================================================================
-        # v8.4 : SAUVEGARDE AUTOMATIQUE QUOTIDIENNE D'UN SNAPSHOT
-        # Aucun clic requis. Une seule écriture par jour (SQLite + Gist).
-        # Cette sauvegarde ne touche jamais à la composition du portefeuille :
-        # l'historique avant/après la bascule du 24/09/26 reste continu.
-        # =====================================================================
+        # v8.5 : SAUVEGARDE AUTOMATIQUE QUOTIDIENNE D'UN SNAPSHOT
         try:
             today_str = datetime.now(ZoneInfo("Europe/Paris")).strftime("%Y-%m-%d")
             last_snap = pm.get_last_snapshot()
@@ -4957,11 +5020,6 @@ def main():
             ticker = "WMMS.DE"
             ui.render_satellite_card_pedagogic("WMMS Value", "WMMS.DE", unified_scores.get(ticker, {}),
                                                 target_weights.get(ticker, {}), regime, sent_rows, "value", gap_vs_world=wmms_gap)
-        krw_pos = next((p for p in positions_conf if p.get("ticker") == "KRW.PA"), None)
-        if krw_pos:
-            krw_gap = compute_relative_gap(dm, "KRW.PA", days=15)
-            ui.render_satellite_card_pedagogic("MSCI Korea", "KRW.PA", unified_scores.get("KRW.PA", {}),
-                                                target_weights.get("KRW.PA", {}), regime, sent_rows, "korea", gap_vs_world=krw_gap)
         chip_pos = next((p for p in positions_conf if p.get("ticker") == "CHIP.PA"), None)
         if chip_pos:
             chip_gap = compute_relative_gap(dm, "CHIP.PA", days=15)
@@ -4981,6 +5039,7 @@ def main():
         with sub_live: ui.render_risk_engine_v71(ptf)
         with sub_valid: ui.render_risk_v71_validation()
         with sub_optim: ui.render_risk_v71_optimizer(ptf)
+
     with tab_v6:
         render_cusum_section(ui)
         st.markdown("---")
